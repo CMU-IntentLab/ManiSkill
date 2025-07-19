@@ -7,3 +7,4 @@ from .frame_stack import FrameStack
 from .gymnasium import CPUGymWrapper
 from .record import RecordEpisode
 from .action_repeat import ActionRepeatWrapper
+from .dreamer_wrapper import DreamerWrapper
