@@ -77,7 +77,10 @@ class DreamerWrapper(gym.Wrapper):
         final_obs, final_rew, final_terminations, final_truncations, infos = (
             super().step(action)
         )
-
+        if type(action) is torch.Tensor:
+            action[:, -1] = torch.sign(action[:, -1])  # ensure the last action is a sign
+        else:
+            action[:, -1] = np.sign(action[:, -1])
         done = final_terminations | final_truncations
         
         final_obs = {'state': final_obs['agent']['qpos'], # ideally EEF Pos

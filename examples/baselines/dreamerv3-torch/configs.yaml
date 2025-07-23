@@ -54,6 +54,8 @@ defaults:
     {layers: 2, dist: 'symlog_disc', loss_scale: 1.0, outscale: 0.0}
   cont_head:
     {layers: 2, loss_scale: 1.0, outscale: 1.0}
+  margin_head:
+    {layers: 2, loss_scale: 10.0}
   dyn_scale: 0.5
   rep_scale: 0.1
   kl_free: 1.0

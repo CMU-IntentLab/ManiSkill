@@ -18,7 +18,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 import wandb
 to_np = lambda x: x.detach().cpu().numpy()
-
+from tqdm import tqdm
+import h5py
+from collections import defaultdict
 
 def symlog(x):
     return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
@@ -141,6 +143,48 @@ class Logger:
         wandb.log({name: wandb.Video(value, fps=16, format="mp4")}, step=step)
 
 
+def fill_expert_dataset(config, cache):
+    dataset_path = config.offline_data_path 
+    f = h5py.File(dataset_path, "r")
+    demos = list(f.keys())
+
+    for i, demo in tqdm(
+        enumerate(demos),
+        desc="Loading in expert data",
+        ncols=0,
+        leave=False,
+        total=len(demos),
+    ):
+        traj = f[demo]
+        T = traj['obs']['sensor_data']["hand_camera"]['rgb'].shape[0]
+        for t in range(T):  # store (aₜ, rₜ, oₜ₊₁)
+            transition = defaultdict(np.array)
+
+            # Observation o_{t+1}
+            transition['wrist_cam'] = traj['obs']['sensor_data']["hand_camera"]['rgb'][t]
+            transition['front_cam'] = traj['obs']['sensor_data']["base_camera"]['rgb'][t]
+            transition['state'] = traj["obs"]["agent"]["qpos"][t]  # ideally EEF pos or qpos
+
+            # Action and reward from time t
+            if t == 0:
+                transition["action"] = np.zeros_like(traj["actions"][t], dtype=np.float32)
+                transition["reward"] = np.zeros_like(traj["rewards"][t], dtype=np.float32)
+            else:
+                transition["action"] = np.array(traj["actions"][t-1], dtype=np.float32)
+                transition["reward"] = np.array(traj["rewards"][t-1], dtype=np.float32)
+
+            # Bookkeeping
+            transition["is_first"] = np.array(t == 0, dtype=np.bool_)
+            transition["is_last"] = np.array(t == T-1, dtype=np.bool_)  # last valid step is T-2
+            transition["is_terminal"] = np.array(t == T -1, dtype=np.bool_)  # terminate after final real action
+            transition["discount"] = np.array(1.0 if t < T - 1 else 0.0, dtype=np.float32)
+
+            # Optional failure tag
+            transition["failure"] = np.array(-1, dtype=np.float32)
+
+            add_to_cache(cache, f"exp_traj_{i}", transition)
+    
+
 def simulate(
     agent,
     envs,
@@ -154,6 +198,16 @@ def simulate(
     state=None,
 ):
     torch.cuda.empty_cache()
+    
+    times = {
+        "env_step": 0.0,
+        "agent_infer": 0.0,
+        "agent_train": 0.0,
+        "data_transfer": 0.0,
+        "logging": 0.0,
+        "other": 0.0,
+    }
+
     # initialize or unpack simulation state
     if state is None:
         step, episode = 0, 0
@@ -176,31 +230,50 @@ def simulate(
     
     
     while (steps and step < steps) or (episodes and episode < episodes):
+        #print('step', step, 'episode', episode)
+        loop_start = time.time()
         # pretty sure the env will automatically reset....
+        #t0 = time.time()
         action, agent_state = agent(obs_vec, done_vec, agent_state)
+        #times["agent_infer"] += time.time() - t0
         #safety_score = agent_state[2]
         #agent_state = agent_state[:2]
+
+        #t0 = time.time()
         if isinstance(action, dict):
             action = {k: np.array(action[k].detach().cpu()) for k in action}
         else:
             action = np.array(action)
-                
+        #times["data_transfer"] += time.time() - t0        
+        
+        #t0 = time.time()
         obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
+        #times["env_step"] += time.time() - t0
+        
+        #t0 = time.time()
         done_vec = term_vec | trunc_vec
-        obs = [
+        done = done_vec.cpu().numpy()
+        reward = reward_vec.cpu().numpy().tolist()
+        obs_vec['failure'] = info_vec['is_knocked_over']
+
+        obs_cpu = {k: v.detach().cpu().numpy() for k, v in obs_vec.items()}
+        obs = [{k: obs_cpu[k][i] for k in obs_cpu} for i in range(envs.num_envs)]
+        #times["data_transfer"] += time.time() - t0
+        '''obs = [
             {key: obs_vec[key][i].item() if np.size(np.array(obs_vec[key][i].detach().cpu())) ==1 else np.array(obs_vec[key][i].detach().cpu())#if torch.is_tensor(obs_vec[key]) else obs_vec[key]
             for key in obs_vec}
             for i in range(envs.num_envs)
-        ]
+        ]'''
         
+        #reward = list(reward_vec)
+        #reward = [r.item() for r in reward]
+        #done = np.array(done_vec.cpu())
         obs = list(obs)
-        reward = list(reward_vec)
-        reward = [r.item() for r in reward]
-        
-        done = np.array(done_vec.cpu())
         cur_ids = info_vec['env_ids']
         #cur_ids = [o['env_ids'] for o in obs]
         #print('cur_ids', cur_ids)
+
+        #t0 = time.time()
         if done.any():
             indices = [index for index, d in enumerate(done) if d]
             for i in indices:
@@ -249,7 +322,6 @@ def simulate(
 
         if done.any():
             indices = [index for index, d in enumerate(done) if d]
-            print("indices", indices)
             # logging for done episode
             for i in indices:
                 #print('cache', cache.keys())
@@ -307,6 +379,13 @@ def simulate(
                         logger.scalar(f"eval_episodes", len(eval_scores))
                         logger.write(step=logger.step)
                         eval_done = True
+
+        #times["logging"] += time.time() - t0
+
+        #loop_end = time.time()
+        #for key, value in times.items():
+        #    print(f"{key} time: {value:.4f} sec")
+        #print(f"  Total loop time: {(loop_end - loop_start):.4f} sec\n")
     if is_eval:
         # keep only last item for saving memory. this cache is used for video_pred later
         while len(cache) > 1:
@@ -523,7 +602,7 @@ class DiscDist:
         high=20.0,
         transfwd=symlog,
         transbwd=symexp,
-        device="cuda",
+        device="cuda:0",
     ):
         self.logits = logits
         self.probs = torch.softmax(logits, -1)

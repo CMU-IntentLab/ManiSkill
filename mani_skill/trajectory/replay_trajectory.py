@@ -55,11 +55,11 @@ class Args:
     """Maximum number of times to try and replay a trajectory until the task reaches a success state at the end."""
     discard_timeout: bool = False
     """Whether to discard episodes that timeout and are truncated (depends on the max_episode_steps parameter of task)"""
-    allow_failure: bool = False
+    allow_failure: bool = True
     """Whether to include episodes that fail in saved videos and trajectory data based on the environment's evaluation returned "success" label"""
     vis: bool = False
     """Whether to visualize the trajectory replay via the GUI."""
-    use_env_states: bool = False
+    use_env_states: bool = True
     """Whether to replay by environment states instead of actions. This guarantees that the environment will look exactly
     the same as the original trajectory at every step."""
     use_first_env_state: bool = False

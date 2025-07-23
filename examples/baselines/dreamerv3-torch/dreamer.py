@@ -72,9 +72,9 @@ class Args:
     """whether to include the state in the observation"""
     env_vectorization: str = "gpu"
     """the type of environment vectorization to use"""
-    num_envs: int = 1
+    num_envs: int = 16
     """the number of parallel environments"""
-    num_eval_envs: int = 1
+    num_eval_envs: int = 10
     """the number of parallel evaluation environments"""
     partial_reset: bool = False
     """whether to let parallel environments reset upon termination instead of truncation"""
@@ -92,62 +92,28 @@ class Args:
     """evaluation frequency in terms of iterations"""
     save_train_video_freq: Optional[int] = None
     """frequency to save training videos in terms of iterations"""
-    control_mode: Optional[str] = "pd_joint_delta_pos"
+    control_mode: Optional[str] = "pd_ee_delta_pose"
     """the control mode to use for the environment"""
     render_mode: str = "all"
     """the environment rendering mode"""
 
-    # Algorithm specific arguments
-    total_timesteps: int = 1_000_000
-    """total timesteps of the experiments"""
-    buffer_size: int = 1_000_000
-    """the replay memory buffer size"""
-    buffer_device: str = "cuda"
-    """where the replay buffer is stored. Can be 'cpu' or 'cuda' for GPU"""
-    gamma: float = 0.8
-    """the discount factor gamma"""
-    tau: float = 0.01
-    """target smoothing coefficient"""
-    batch_size: int = 512
-    """the batch size of sample from the replay memory"""
-    learning_starts: int = 4_000
-    """timestep to start learning"""
-    policy_lr: float = 3e-4
-    """the learning rate of the policy network optimizer"""
-    q_lr: float = 3e-4
-    """the learning rate of the Q network network optimizer"""
-    policy_frequency: int = 1
-    """the frequency of training policy (delayed)"""
-    target_network_frequency: int = 1  # Denis Yarats' implementation delays this by 2.
-    """the frequency of updates for the target nerworks"""
-    alpha: float = 0.2
-    """Entropy regularization coefficient."""
-    autotune: bool = True
-    """automatic tuning of the entropy coefficient"""
-    training_freq: int = 64
-    """training frequency (in steps)"""
-    utd: float = 0.25
-    """update to data ratio"""
     partial_reset: bool = False
     """whether to let parallel environments reset upon termination instead of truncation"""
-    bootstrap_at_done: str = "always"
-    """the bootstrap method to use when a done signal is received. Can be 'always' or 'never'"""
     camera_width: Optional[int] = None
     """the width of the camera image. If none it will use the default the environment specifies"""
     camera_height: Optional[int] = None
     """the height of the camera image. If none it will use the default the environment specifies."""
 
     # to be filled in runtime
-    grad_steps_per_iteration: int = 0
     """the number of gradient updates per iteration"""
     steps_per_env: int = 0
     """the number of steps each parallel env takes per iteration"""
 
 
     parallel: bool = True
-    eval_every: int = 1e4
+    eval_every: int = 10_000
     eval_episode_num: int = 10
-    log_every: int = 1e4
+    log_every: int = 10_000
     reset_every: int =  0
     device: str = 'cuda:0'
     compile: bool = True
@@ -155,12 +121,12 @@ class Args:
     debug: bool =  False
     video_pred_log: bool =  True
     precision: int = 32
-    action_repeat: int = 2
-    steps = int = 1e6
+    action_repeat: int = 1
+    steps = int = 10_000_000
 
-    eval_every: int = 1e4
-    log_every: int = 1e4
-    time_limit: int = 1e3
+    eval_every: int = 10_000
+    log_every: int = 10_000
+    #time_limit: int = 1e3
     offline_traindir: str = ''
     offline_evaldir: str = ''
     reset_every: int = 0
@@ -199,22 +165,17 @@ class Args:
     disag_action_cond: bool = False
 
 
-    batch_size: int = 16
-    batch_length: int = 32
-    train_ratio: int = 512
-    pretrain: int = 100
+    batch_size: int = 32
+    batch_length: int = 16
+    train_ratio: int = 64
     model_lr: float = 1e-4
     opt_eps: float = 1e-8
     grad_clip: int = 1000
     dataset_size: int = 1000000
     opt: str = 'adam'
 
-    # Environment
-    #task: 'dmc_walker_walk'
-    #size: [64, 64]
-    #envs: 1
-    action_repeat: int = 2
-    time_limit: int = 1000
+
+    time_limit: int = 100
     grayscale: bool = False
     prefill: int = 2500
     reward_EMA: bool = True
@@ -226,10 +187,58 @@ class Args:
     imag_gradient: str = 'dynamics'
     imag_gradient_mix: float =  0.0
     eval_state_mean: bool = False
-        
+
+    gamma_lx: float = 0.75
+    offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753161439/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    pretrain: int = 500
+    hybrid_steps: int = 1_000_000
+    hybrid: bool = True
+from typing import Dict, Any, Union
+
+def combine_dictionaries(
+    one_dict: Dict[str, Any], other_dict: Dict[str, Any], take_half: bool = False
+) -> Dict[str, Any]:
+    """
+    Combine two dictionaries by interleaving their values.
+
+    Args:
+        one_dict (Dict[str, Any]): The first dictionary.
+        other_dict (Dict[str, Any]): The second dictionary.
+        take_half (bool, optional): Whether to only take the first half of the values. Defaults to False.
+    """
+    combined = {}
+    unused_keys = set(one_dict.keys()) - set(other_dict.keys())
+    assert set(unused_keys).issubset(
+        {"logprob", "object_state", "privileged_state", "env_ids", "success"}
+    ), f"Missing {unused_keys}"
+    for k, v in one_dict.items():
+        if k in unused_keys:
+            continue
+        if isinstance(v, dict):
+            combined[k] = combine_dictionaries(v, other_dict[k], take_half)
+        elif v is None or v.shape[0] == 0:
+            combined[k] = other_dict[k]
+        elif other_dict[k] is None or other_dict[k].shape[0] == 0:
+            combined[k] = v
+        else:
+            if take_half:
+                half_index = v.shape[0] // 2
+                v = v[:half_index]
+                other_v = other_dict[k][:half_index]
+            else:
+                other_v = other_dict[k]
+
+            tmp = np.empty((v.shape[0] + other_v.shape[0], *v.shape[1:]), dtype=v.dtype)
+            tmp[0::2] = v
+            tmp[1::2] = other_v
+            combined[k] = tmp
+
+    return combined
+
+
 
 class Dreamer(nn.Module):
-    def __init__(self, obs_space, act_space, args, logger, dataset):
+    def __init__(self, obs_space, act_space, args, logger, dataset, expert_dataset=None):
         super(Dreamer, self).__init__()
         self._args = args
         self._logger = logger
@@ -244,6 +253,7 @@ class Dreamer(nn.Module):
         self._step = logger.step // args.action_repeat
         self._update_count = 0
         self._dataset = dataset
+        self._expert_dataset = expert_dataset
         self._wm = models.WorldModel(obs_space, act_space, self._step, args)
         self._task_behavior = models.ImagBehavior(args, self._wm)
         if (
@@ -257,8 +267,10 @@ class Dreamer(nn.Module):
             random=lambda: expl.Random(args, act_space),
             plan2explore=lambda: expl.Plan2Explore(args, self._wm, reward),
         )[args.expl_behavior]().to(self._args.device)
-
+        self.hybrid = args.hybrid
     def __call__(self, obs, reset, state=None, training=True):
+        #t0 = time.time()
+
         step = self._step
         if training:
             steps = (
@@ -267,9 +279,18 @@ class Dreamer(nn.Module):
                 else self._should_train(step)
             )
             for _ in range(steps):
-                self._train(next(self._dataset))
+                if self.hybrid and step < self._args.hybrid_steps:
+                    learner_data, exp_data = (
+                            next(self._dataset),
+                            next(self._expert_dataset),
+                        )
+                    self._train(learner_data, expert_data=exp_data)
+                else:
+                    self._train(next(self._dataset), expert_data=None)
+                #self._train(next(self._dataset))
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
+
             if self._should_log(step):
                 for name, values in self._metrics.items():
                     self._logger.scalar(name, float(np.mean(values)))
@@ -278,12 +299,22 @@ class Dreamer(nn.Module):
                     openl = self._wm.video_pred(next(self._dataset))
                     self._logger.video("train_openl", to_np(openl))
                 self._logger.write(fps=True)
+        #t_train_end = time.time()
 
+        #t_policy_start = time.time()
         policy_output, state = self._policy(obs, state, training)
+        #t_policy_end = time.time()
 
         if training:
             self._step += len(reset)
             self._logger.step = self._args.action_repeat * self._step
+
+        #t1 = time.time()
+
+        #print(f"Training time: {t_train_end - t_train_start:.4f} seconds")
+        #print(f"Policy time: {t_policy_end - t_policy_start:.4f} seconds")
+        #print(f"Other overhead: {t1 - t0 - (t_train_end - t_train_start) - (t_policy_end - t_policy_start):.4f} seconds")
+        #print(f"Total Dreamer call time: {t1 - t0:.4f} seconds")
         return policy_output, state
 
     def _policy(self, obs, state, training):
@@ -317,11 +348,17 @@ class Dreamer(nn.Module):
         state = (latent, action)
         return policy_output, state
 
-    def _train(self, data):
+    def _train(self, data, expert_data):
         metrics = {}
-        post, context, mets = self._wm._train(data)
+        if self.hybrid and self._step < self._args.hybrid_steps:
+            mixed_data = combine_dictionaries(data, expert_data, take_half=True)
+            post, context, mets = self._wm._train(mixed_data)
+        else:
+            post, context, mets = self._wm._train(data)
         metrics.update(mets)
-        start = post
+
+
+        start = post #self._wm._get_post(data) #post
         reward = lambda f, s, a: self._wm.heads["reward"](
             self._wm.dynamics.get_feat(s)
         ).mode()
@@ -344,66 +381,6 @@ def make_dataset(episodes, args):
     generator = tools.sample_episodes(episodes, args.batch_length)
     dataset = tools.from_generator(generator, args.batch_size)
     return dataset
-
-
-def make_env(args, mode, id):
-    suite, task = args.task.split("_", 1)
-    if suite == "dmc":
-        import envs.dmc as dmc
-
-        env = dmc.DeepMindControl(
-            task, args.action_repeat, args.size, seed=args.seed + id
-        )
-        env = wrappers.NormalizeActions(env)
-    elif suite == "atari":
-        import envs.atari as atari
-
-        env = atari.Atari(
-            task,
-            args.action_repeat,
-            args.size,
-            gray=args.grayscale,
-            noops=args.noops,
-            lives=args.lives,
-            sticky=args.stickey,
-            actions=args.actions,
-            resize=args.resize,
-            seed=args.seed + id,
-        )
-        env = wrappers.OneHotAction(env)
-    elif suite == "dmlab":
-        import envs.dmlab as dmlab
-
-        env = dmlab.DeepMindLabyrinth(
-            task,
-            mode if "train" in mode else "test",
-            args.action_repeat,
-            seed=args.seed + id,
-        )
-        env = wrappers.OneHotAction(env)
-    elif suite == "memorymaze":
-        from envs.memorymaze import MemoryMaze
-
-        env = MemoryMaze(task, seed=args.seed + id)
-        env = wrappers.OneHotAction(env)
-    elif suite == "crafter":
-        import envs.crafter as crafter
-
-        env = crafter.Crafter(task, args.size, seed=args.seed + id)
-        env = wrappers.OneHotAction(env)
-    elif suite == "minecraft":
-        import envs.minecraft as minecraft
-
-        env = minecraft.make_env(task, size=args.size, break_speed=args.break_speed)
-        env = wrappers.OneHotAction(env)
-    else:
-        raise NotImplementedError(suite)
-    env = wrappers.TimeLimit(env, args.time_limit)
-    env = wrappers.SelectAction(env, key="action")
-    env = wrappers.UUID(env)
-    if suite == "minecraft":
-        env = wrappers.RewardObs(env)
-    return env
     
 
 class Logger:
@@ -419,8 +396,6 @@ class Logger:
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    args.grad_steps_per_iteration = int(args.training_freq * args.utd)
-    args.steps_per_env = args.training_freq // args.num_envs
     if args.exp_name is None:
         args.exp_name = os.path.basename(__file__)[: -len(".py")]
         run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
@@ -443,6 +418,7 @@ if __name__ == "__main__":
     args.critic = {'layers': 2, 'dist': 'symlog_disc', 'slow_target': True, 'slow_target_update': 1, 'slow_target_fraction': 0.02, 'lr': 3e-5, 'eps': 1e-5, 'grad_clip': 100.0, 'outscale': 0.0}
     args.reward_head =  {'layers': 2, 'dist': 'symlog_disc', 'loss_scale': 1.0, 'outscale': 0.0}
     args.cont_head =  {'layers': 2, 'loss_scale': 1.0, 'outscale': 1.0}
+    args.margin_head =  {'layers': 2, 'loss_scale': 1.0}
     args.grad_heads = ['decoder', 'reward', 'cont']
 
     # TRY NOT TO MODIFY: seeding
@@ -451,7 +427,7 @@ if __name__ == "__main__":
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() and args.cuda else "cpu")
 
     ####### Environment setup #######
     env_kwargs = dict(obs_mode=args.obs_mode, render_mode=args.render_mode, sim_backend="gpu", sensor_configs=dict())
@@ -465,15 +441,18 @@ if __name__ == "__main__":
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, human_render_camera_configs=dict(shader_pack="default"), **env_kwargs)
     
+    envs = DreamerWrapper(envs)
+    eval_envs = DreamerWrapper(eval_envs)
     envs = SelectAction(envs)
     eval_envs = SelectAction(eval_envs)
     envs = UUID(envs)
     eval_envs = UUID(eval_envs)
-    envs = DreamerWrapper(envs)
-    eval_envs = DreamerWrapper(eval_envs)
+    
+    
     # rgbd obs mode returns a dict of data, we flatten it so there is just a rgbd key and state key
     #envs = FlattenRGBDObservationWrapper(envs, rgb=True, depth=False, state=args.include_state)
-
+    max_episode_steps = gym_utils.find_max_episode_steps_value(envs.env) #60
+    print(f"Max episode steps: {max_episode_steps}")
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
         eval_envs = FlattenActionSpaceWrapper(eval_envs)
@@ -484,13 +463,12 @@ if __name__ == "__main__":
         print(f"Saving eval trajectories/videos to {eval_output_dir}")
         if args.save_train_video_freq is not None:
             save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
-            envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=args.num_steps, video_fps=30)
-        eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory, save_video=args.capture_video, trajectory_name="trajectory", max_steps_per_video=args.num_eval_steps, video_fps=30)
+            envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=max_episode_steps, video_fps=30)
+        eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory, save_video=args.capture_video, trajectory_name="trajectory", max_steps_per_video=max_episode_steps, video_fps=30)
     envs = ManiSkillVectorEnv(envs, args.num_envs, ignore_terminations=not args.partial_reset, record_metrics=True)
     eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    max_episode_steps = 100 #hardcoded bc of bug for now gym_utils.find_max_episode_steps_value(envs._env)
     logger = None
     if not args.evaluate:
         print("Running training")
@@ -519,13 +497,6 @@ if __name__ == "__main__":
         print("Running evaluation")
 
 
-
-
-    #if args.deterministic_run:
-    #    tools.enable_deterministic_run()
-    
-
-
     print("Logdir", logdir)
     logdir.mkdir(parents=True, exist_ok=True)
     args.traindir.mkdir(parents=True, exist_ok=True)
@@ -546,20 +517,12 @@ if __name__ == "__main__":
         directory = args.evaldir
     eval_eps = tools.load_episodes(directory, limit=1)
     expert_eps = collections.OrderedDict()
-    #tools.fill_expert_dataset(args, expert_eps)
-
-
-    # TODO  might need wrappers
-    #env = gym.make(task, cfg=env_cfg, render_mode="rgb_array")
-    #env = DreamerVecEnvWrapper(env, device = env_cfg.sim.device)
-    #env = wrappers.NormalizeActions(env, mode='torch')
-    #env = wrappers.SelectAction(env, key="action")
-    #env = wrappers.UUID(env)
+    if args.hybrid:
+        tools.fill_expert_dataset(args, expert_eps)
 
     acts = envs.single_action_space
     acts.low = np.ones_like(acts.low) * -1
     acts.high = np.ones_like(acts.high) # need to normalize actions 
-    print(acts)
     print("Action Space", acts)
     
     args.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
@@ -609,12 +572,12 @@ if __name__ == "__main__":
     expert_dataset = make_dataset(expert_eps, args)
 
     agent = Dreamer(
-        envs.single_observation_space,#train_envs[0].observation_space,
-        envs.single_action_space,#train_envs[0].action_space,
+        envs.single_observation_space,
+        envs.single_action_space,
         args,
         logger,
         train_dataset,
-        #expert_dataset=expert_dataset if args.hybrid_training else None,
+        expert_dataset=expert_dataset,
     ).to(args.device)
     agent.requires_grad_(requires_grad=False)
     if (logdir / "latest.pt").exists():
@@ -657,282 +620,8 @@ if __name__ == "__main__":
             "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
         }
         torch.save(items_to_save, logdir / "latest.pt")
-    for env in train_envs + eval_envs:
+    for env in envs + eval_envs:
         try:
             env.close()
         except Exception:
             pass
-
-
-
-
-
-
-
-
-
-    envs.single_observation_space.dtype = np.float32
-    rb = ReplayBuffer(
-        env=envs,
-        num_envs=args.num_envs,
-        buffer_size=args.buffer_size,
-        storage_device=torch.device(args.buffer_device),
-        sample_device=device
-    )
-
-
-    # TRY NOT TO MODIFY: start the game
-    obs, info = envs.reset(seed=args.seed) # in Gymnasium, seed is given to reset() instead of seed()
-    eval_obs, _ = eval_envs.reset(seed=args.seed)
-
-    # architecture is all actor, q-networks share the same vision encoder. Output of encoder is concatenates with any state data followed by separate MLPs.
-    actor = Actor(envs, sample_obs=obs).to(device)
-    qf1 = SoftQNetwork(envs, actor.encoder).to(device)
-    qf2 = SoftQNetwork(envs, actor.encoder).to(device)
-    qf1_target = SoftQNetwork(envs, actor.encoder).to(device)
-    qf2_target = SoftQNetwork(envs, actor.encoder).to(device)
-    if args.checkpoint is not None:
-        ckpt = torch.load(args.checkpoint)
-        actor.load_state_dict(ckpt['actor'])
-        qf1.load_state_dict(ckpt['qf1'])
-        qf2.load_state_dict(ckpt['qf2'])
-    qf1_target.load_state_dict(qf1.state_dict())
-    qf2_target.load_state_dict(qf2.state_dict())
-    q_optimizer = optim.Adam(
-        list(qf1.mlp.parameters()) +
-        list(qf2.mlp.parameters()) +
-        list(qf1.encoder.parameters()),
-        lr=args.q_lr)
-    actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr)
-
-    # Automatic entropy tuning
-    if args.autotune:
-        target_entropy = -torch.prod(torch.Tensor(envs.single_action_space.shape).to(device)).item()
-        log_alpha = torch.zeros(1, requires_grad=True, device=device)
-        alpha = log_alpha.exp().item()
-        a_optimizer = optim.Adam([log_alpha], lr=args.q_lr)
-    else:
-        alpha = args.alpha
-
-    global_step = 0
-    global_update = 0
-    learning_has_started = False
-
-    global_steps_per_iteration = args.num_envs * (args.steps_per_env)
-    pbar = tqdm.tqdm(range(args.total_timesteps))
-    cumulative_times = defaultdict(float)
-
-    while global_step < args.total_timesteps:
-        if args.eval_freq > 0 and (global_step - args.training_freq) // args.eval_freq < global_step // args.eval_freq:
-            # evaluate
-            actor.eval()
-            stime = time.perf_counter()
-            eval_obs, _ = eval_envs.reset()
-            eval_metrics = defaultdict(list)
-            num_episodes = 0
-            for _ in range(args.num_eval_steps):
-                with torch.no_grad():
-                    eval_obs, eval_rew, eval_terminations, eval_truncations, eval_infos = eval_envs.step(actor.get_eval_action(eval_obs))
-                    if "final_info" in eval_infos:
-                        mask = eval_infos["_final_info"]
-                        num_episodes += mask.sum()
-                        for k, v in eval_infos["final_info"]["episode"].items():
-                            eval_metrics[k].append(v)
-            eval_metrics_mean = {}
-            for k, v in eval_metrics.items():
-                mean = torch.stack(v).float().mean()
-                eval_metrics_mean[k] = mean
-                if logger is not None:
-                    logger.add_scalar(f"eval/{k}", mean, global_step)
-            pbar.set_description(
-                f"success_once: {eval_metrics_mean['success_once']:.2f}, "
-                f"return: {eval_metrics_mean['return']:.2f}"
-            )
-            if logger is not None:
-                eval_time = time.perf_counter() - stime
-                cumulative_times["eval_time"] += eval_time
-                logger.add_scalar("time/eval_time", eval_time, global_step)
-            if args.evaluate:
-                break
-            actor.train()
-
-            if args.save_model:
-                model_path = f"runs/{run_name}/ckpt_{global_step}.pt"
-                torch.save({
-                    'actor': actor.state_dict(),
-                    'qf1': qf1_target.state_dict(),
-                    'qf2': qf2_target.state_dict(),
-                    'log_alpha': log_alpha,
-                }, model_path)
-                print(f"model saved to {model_path}")
-
-        # Collect samples from environemnts
-        rollout_time = time.perf_counter()
-        for local_step in range(args.steps_per_env):
-            global_step += 1 * args.num_envs
-
-            # ALGO LOGIC: put action logic here
-            if not learning_has_started:
-                actions = torch.tensor(envs.action_space.sample(), dtype=torch.float32, device=device)
-            else:
-                actions, _, _, _ = actor.get_action(obs)
-                actions = actions.detach()
-
-            # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, rewards, terminations, truncations, infos = envs.step(actions)
-            real_next_obs = {k:v.clone() for k, v in next_obs.items()}
-            if args.bootstrap_at_done == 'never':
-                need_final_obs = torch.ones_like(terminations, dtype=torch.bool)
-                stop_bootstrap = truncations | terminations # always stop bootstrap when episode ends
-            else:
-                if args.bootstrap_at_done == 'always':
-                    need_final_obs = truncations | terminations # always need final obs when episode ends
-                    stop_bootstrap = torch.zeros_like(terminations, dtype=torch.bool) # never stop bootstrap
-                else: # bootstrap at truncated
-                    need_final_obs = truncations & (~terminations) # only need final obs when truncated and not terminated
-                    stop_bootstrap = terminations # only stop bootstrap when terminated, don't stop when truncated
-            if "final_info" in infos:
-                final_info = infos["final_info"]
-                done_mask = infos["_final_info"]
-                for k in real_next_obs.keys():
-                    real_next_obs[k][need_final_obs] = infos["final_observation"][k][need_final_obs].clone()
-                for k, v in final_info["episode"].items():
-                    logger.add_scalar(f"train/{k}", v[done_mask].float().mean(), global_step)
-
-            rb.add(obs, real_next_obs, actions, rewards, stop_bootstrap)
-
-            # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
-            obs = next_obs
-        rollout_time = time.perf_counter() - rollout_time
-        cumulative_times["rollout_time"] += rollout_time
-        pbar.update(args.num_envs * args.steps_per_env)
-
-        # ALGO LOGIC: training.
-        if global_step < args.learning_starts:
-            continue
-
-        update_time = time.perf_counter()
-        learning_has_started = True
-        for local_update in range(args.grad_steps_per_iteration):
-            global_update += 1
-            data = rb.sample(args.batch_size)
-
-            # update the value networks
-            with torch.no_grad():
-                next_state_actions, next_state_log_pi, _, visual_feature = actor.get_action(data.next_obs)
-                qf1_next_target = qf1_target(data.next_obs, next_state_actions, visual_feature)
-                qf2_next_target = qf2_target(data.next_obs, next_state_actions, visual_feature)
-                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - alpha * next_state_log_pi
-                next_q_value = data.rewards.flatten() + (1 - data.dones.flatten()) * args.gamma * (min_qf_next_target).view(-1)
-                # data.dones is "stop_bootstrap", which is computed earlier according to args.bootstrap_at_done
-            visual_feature = actor.encoder(data.obs)
-            qf1_a_values = qf1(data.obs, data.actions, visual_feature).view(-1)
-            qf2_a_values = qf2(data.obs, data.actions, visual_feature).view(-1)
-            qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
-            qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
-            qf_loss = qf1_loss + qf2_loss
-
-            q_optimizer.zero_grad()
-            qf_loss.backward()
-            q_optimizer.step()
-
-            # update the policy network
-            if global_update % args.policy_frequency == 0:  # TD 3 Delayed update support
-                pi, log_pi, _, visual_feature = actor.get_action(data.obs)
-                qf1_pi = qf1(data.obs, pi, visual_feature, detach_encoder=True)
-                qf2_pi = qf2(data.obs, pi, visual_feature, detach_encoder=True)
-                min_qf_pi = torch.min(qf1_pi, qf2_pi).view(-1)
-                actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
-
-                actor_optimizer.zero_grad()
-                actor_loss.backward()
-                actor_optimizer.step()
-
-                if args.autotune:
-                    with torch.no_grad():
-                        _, log_pi, _, _ = actor.get_action(data.obs)
-                    # if args.correct_alpha:
-                    alpha_loss = (-log_alpha.exp() * (log_pi + target_entropy)).mean()
-                    # else:
-                    #     alpha_loss = (-log_alpha * (log_pi + target_entropy)).mean()
-                    # log_alpha has a legacy reason: https://github.com/rail-berkeley/softlearning/issues/136#issuecomment-619535356
-
-                    a_optimizer.zero_grad()
-                    alpha_loss.backward()
-                    a_optimizer.step()
-                    alpha = log_alpha.exp().item()
-
-            # update the target networks
-            if global_update % args.target_network_frequency == 0:
-                for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
-                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
-                for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
-                    target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
-        update_time = time.perf_counter() - update_time
-        cumulative_times["update_time"] += update_time
-
-        # Log training-related data
-        if (global_step - args.training_freq) // args.log_freq < global_step // args.log_freq:
-            logger.add_scalar("losses/qf1_values", qf1_a_values.mean().item(), global_step)
-            logger.add_scalar("losses/qf2_values", qf2_a_values.mean().item(), global_step)
-            logger.add_scalar("losses/qf1_loss", qf1_loss.item(), global_step)
-            logger.add_scalar("losses/qf2_loss", qf2_loss.item(), global_step)
-            logger.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_step)
-            logger.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
-            logger.add_scalar("losses/alpha", alpha, global_step)
-            logger.add_scalar("time/update_time", update_time, global_step)
-            logger.add_scalar("time/rollout_time", rollout_time, global_step)
-            logger.add_scalar("time/rollout_fps", global_steps_per_iteration / rollout_time, global_step)
-            for k, v in cumulative_times.items():
-                logger.add_scalar(f"time/total_{k}", v, global_step)
-            logger.add_scalar("time/total_rollout+update_time", cumulative_times["rollout_time"] + cumulative_times["update_time"], global_step)
-            if args.autotune:
-                logger.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
-
-    if not args.evaluate and args.save_model:
-        model_path = f"runs/{run_name}/final_ckpt.pt"
-        torch.save({
-            'actor': actor.state_dict(),
-            'qf1': qf1_target.state_dict(),
-            'qf2': qf2_target.state_dict(),
-            'log_alpha': log_alpha,
-        }, model_path)
-        print(f"model saved to {model_path}")
-        writer.close()
-    envs.close()
-
-
-
-'''if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--configs", nargs="+")
-    parser.add_argument("--headless", action="store_true")
-    parser.add_argument("--enable_cameras", action="store_true")
-    parser.add_argument("--livestream")
-    args, remaining = parser.parse_known_args()
-    yaml = YAML(typ='safe', pure=True)
-    args_path = pathlib.Path(sys.argv[0]).parent / "configs.yaml"
-    print(args_path)
-    with open(args_path, 'r') as file:
-        configs = yaml.load(file)
-    #configs = yaml.load(
-    #    (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()
-    #)
-
-    def recursive_update(base, update):
-        for key, value in update.items():
-            if isinstance(value, dict) and key in base:
-                recursive_update(base[key], value)
-            else:
-                base[key] = value
-
-    name_list = ["defaults", *args.configs] if args.configs else ["defaults"]
-    defaults = {}
-    for name in name_list:
-        recursive_update(defaults, configs[name])
-    parser = argparse.ArgumentParser()
-    for key, value in sorted(defaults.items(), key=lambda x: x[0]):
-        arg_type = tools.args_type(value)
-        parser.add_argument(f"--{key}", type=arg_type, default=arg_type(value))
-    main(parser.parse_args(remaining))
-    simulation_app.close()'''

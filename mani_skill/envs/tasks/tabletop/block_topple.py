@@ -35,7 +35,7 @@ capabilities can be simulated and trained properly. Hence there is extra code fo
 """
 
 
-@register_env("BlockTopple-v0", max_episode_steps=100)
+@register_env("BlockTopple-v0", max_episode_steps=60)
 class BlockToppleEnv(BaseEnv):
 
     _sample_video_link = "https://github.com/haosulab/ManiSkill/raw/main/figures/environment_demos/PickCube-v1_rt.mp4"
@@ -47,7 +47,6 @@ class BlockToppleEnv(BaseEnv):
         "widowxai",
     ]
     agent: Union[PandaWristCam, Fetch, XArm6Robotiq, SO100]
-    goal_thresh = 0.1
 
     def __init__(self, *args, robot_uids="panda_wristcam", robot_init_qpos_noise=0.02, **kwargs):
         self.robot_init_qpos_noise = robot_init_qpos_noise
@@ -55,7 +54,6 @@ class BlockToppleEnv(BaseEnv):
             cfg = PICK_CUBE_CONFIGS[robot_uids]
         else:
             cfg = PICK_CUBE_CONFIGS["panda"]
-        self.goal_thresh = 0.1
         self.sensor_cam_eye_pos = cfg["sensor_cam_eye_pos"]
         self.sensor_cam_target_pos = cfg["sensor_cam_target_pos"]
         self.human_cam_eye_pos = cfg["human_cam_eye_pos"]
@@ -141,7 +139,7 @@ class BlockToppleEnv(BaseEnv):
             xyz[:, 1] += 0.07*2
             self.block2.set_pose(Pose.create_from_pq(xyz, qs))
 
-            qpos = torch.tensor([ 0. ,0.39269908 , 0., -1.96349541, 0.,   2.3561944, 0.78539816, 0, 0.04])
+            qpos = torch.tensor([ 0. ,0.39269908 , 0., -1.96349541, 0.,   2.3561944, 0.78539816, 0, 0.07])
             self.agent.robot.set_qpos(qpos)
 
     def _get_obs_extra(self, info: Dict):
@@ -180,10 +178,47 @@ class BlockToppleEnv(BaseEnv):
 
         fail = torch.logical_or(left_fail, right_fail).float()
         return fail
+    
+    def object_upright_penalty(self, scale: float = 0.005, threshold: float = 0.1) -> torch.Tensor:
+        """
+        Returns a smooth uprightness penalty for early tilt detection without dominating loss.
+
+        Applies only above a threshold, saturates at full tilt.
+        Max unscaled penalty per step ≈ 1.0 (for full 90° tilt on both axes),
+        so recommended scale is ~0.001–0.005 depending on desired shaping strength.
+        """
+        left_quat = self.block1.pose.q
+        right_quat = self.block2.pose.q
+
+        left_euler = rotation_conversions.matrix_to_euler_angles(
+            rotation_conversions.quaternion_to_matrix(left_quat), convention="XYZ"
+        )
+        right_euler = rotation_conversions.matrix_to_euler_angles(
+            rotation_conversions.quaternion_to_matrix(right_quat), convention="XYZ"
+        )
+
+        left_dev = left_euler[:, :2]
+        right_dev = right_euler[:, :2]
+
+        # Subtract threshold, zero-out small tilts
+        left_excess = torch.clamp(left_dev.abs() - threshold, min=0.0)
+        right_excess = torch.clamp(right_dev.abs() - threshold, min=0.0)
+
+        # Compute smooth squared penalty
+        left_penalty = torch.norm(left_excess, dim=-1)
+        right_penalty = torch.norm(right_excess, dim=-1)
+        penalty = left_penalty + right_penalty
+
+        # Normalize so max penalty = 1.0 (when both blocks fully flat in both axes)
+        max_norm = 2 * np.sqrt(2) * (np.pi/2 - threshold)
+        normalized = penalty / max_norm
+        normalized = torch.clamp(normalized, max=1.0)
+        return normalized * scale
+
     def evaluate(self):
         # object lifted above a threshold
         is_obj_lifted = (
-            self.block3.pose.p[:, 2] >= self.height + self.goal_thresh
+            self.block3.pose.p[:, 2] >= self.height + self.height/2
         )
         is_grasped = self.agent.is_grasping(self.block3)
         is_robot_static = self.agent.is_static(0.2)
@@ -198,38 +233,57 @@ class BlockToppleEnv(BaseEnv):
         }
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: Dict):
-        block_grasp_loc = self.block3.pose.p
-        block_grasp_loc[:, 2] += 0.075
+        # Adjust block grasp location
+        block_grasp_loc = self.block3.pose.p.clone()
+        block_grasp_loc[:, 2] += 0.07
+
+        # Reaching reward
         tcp_to_obj_dist = torch.linalg.norm(
             block_grasp_loc - self.agent.tcp_pose.p, axis=1
         )
         reaching_reward = 1 - torch.tanh(5 * tcp_to_obj_dist)
         reward = reaching_reward
 
+        # Grasping reward
         is_grasped = info["is_grasped"]
         reward += is_grasped
 
-        obj_to_goal_dist = (
-            self.block3.pose.p[:, 2] - (self.height + self.goal_thresh)
-        )
-        
-        lift_reward = torch.tanh(5 * obj_to_goal_dist)
-        reward += lift_reward * is_grasped
+        # Lifting reward (only when grasped)
+        obj_to_goal_dist = torch.clamp((self.height + 0.05) - self.block3.pose.p[:, 2], min=0.0)
+        dist_reward = 1 - torch.tanh(5 * obj_to_goal_dist)
+        reward += dist_reward * is_grasped 
 
+        # Joint velocity penalty
         qvel = self.agent.robot.get_qvel()
         if self.robot_uids in ["panda_wristcam", "widowxai"]:
             qvel = qvel[..., :-2]
         elif self.robot_uids == "so100":
             qvel = qvel[..., :-1]
+        # Static reward when object is lifted
         static_reward = 1 - torch.tanh(5 * torch.linalg.norm(qvel, axis=1))
         reward += static_reward * info["is_obj_lifted"]
 
+        # Joint velocity regularization
+        joint_vel_pen = torch.linalg.norm(qvel, axis=1)  * 0.05
+        reward -= joint_vel_pen
+        # Penalty for knocking over the block
         reward -= info["is_knocked_over"]*0.5
-        reward[info["success"]] = 5
+        # action magnitude reward
+        ac_rew = torch.linalg.norm(action[:, :6], axis=1) * 0.5
+        reward -= ac_rew
+        upright_penalty = self.object_upright_penalty(scale=0.01)
+        print(upright_penalty.mean())
+        reward -= upright_penalty
+
+        #print(info["success"]) # bool
+        #print(info["is_knocked_over"]) # 0. or 1. 
+        #print(reward.shape, reward.dtype)
+        success_mask = info["success"]
+        reward[success_mask] = 4.0 - info["is_knocked_over"][success_mask]*0.5 - joint_vel_pen[success_mask] - ac_rew[success_mask]
         return reward
 
     def compute_normalized_dense_reward(
         self, obs: Any, action: torch.Tensor, info: Dict
     ):
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / 5
+        return self.compute_dense_reward(obs=obs, action=action, info=info) / 4
 
