@@ -72,7 +72,7 @@ class Args:
     """whether to include the state in the observation"""
     env_vectorization: str = "gpu"
     """the type of environment vectorization to use"""
-    num_envs: int = 16
+    num_envs: int = 1
     """the number of parallel environments"""
     num_eval_envs: int = 10
     """the number of parallel evaluation environments"""
@@ -191,7 +191,7 @@ class Args:
     gamma_lx: float = 0.75
     offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     pretrain: int = 500
-    hybrid_steps: int = 300_000
+    hybrid_steps: int = 1_000_000
     hybrid: bool = True
 from typing import Dict, Any, Union
 
@@ -268,6 +268,8 @@ class Dreamer(nn.Module):
             plan2explore=lambda: expl.Plan2Explore(args, self._wm, reward),
         )[args.expl_behavior]().to(self._args.device)
         self.hybrid = args.hybrid
+        self.gp_metrics = np.array([0,0,0,0])
+        self.nogp_metrics = np.array([0,0,0,0])
     def __call__(self, obs, reset, state=None, training=True):
         #t0 = time.time()
 
@@ -328,6 +330,33 @@ class Dreamer(nn.Module):
         if self._args.eval_state_mean:
             latent["stoch"] = latent["mean"]
         feat = self._wm.dynamics.get_feat(latent)
+
+
+
+        gp = self._wm.heads["margin_gp"](feat)[0].item()
+        no_gp = self._wm.heads["margin_nogp"](feat)[0].item()
+
+
+        # metrics are TN, FP, TP, FN
+        if obs['failure'].item() == 1 and gp < 0: # TN
+            self.gp_metrics += np.array([1, 0, 0, 0])
+        if obs['failure'].item() == 1 and no_gp < 0:
+            self.nogp_metrics += np.array([1, 0, 0, 0])
+        if obs['failure'].item() == 1 and gp > 0: # FP
+            self.gp_metrics += np.array([0, 1, 0, 0])
+        if obs['failure'].item() == 1 and no_gp > 0:
+            self.nogp_metrics += np.array([0, 1, 0, 0])
+
+        if obs['failure'].item() == 0 and gp < 0: # FN
+            self.gp_metrics += np.array([0, 0, 0, 1])
+        if obs['failure'].item() == 0 and no_gp < 0:
+            self.nogp_metrics += np.array([0, 0, 0, 1])
+        if obs['failure'].item() == 0 and gp > 0: # TP
+            self.gp_metrics += np.array([0, 0, 1, 0])
+        if obs['failure'].item() == 0 and no_gp > 0:
+            self.nogp_metrics += np.array([0, 0, 1, 0])
+
+        #print('fail', obs['failure'].item(), 'gp', gp, 'no_gp', no_gp)
         if not training:
             actor = self._task_behavior.actor(feat)
             action = actor.mode()
@@ -337,6 +366,9 @@ class Dreamer(nn.Module):
         else:
             actor = self._task_behavior.actor(feat)
             action = actor.sample()
+
+        
+        action = actor.sample()
         logprob = actor.log_prob(action)
         latent = {k: v.detach() for k, v in latent.items()}
         action = action.detach()
@@ -517,9 +549,7 @@ if __name__ == "__main__":
         directory = args.evaldir
     eval_eps = tools.load_episodes(directory, limit=1)
     expert_eps = collections.OrderedDict()
-    if args.hybrid:
-        tools.fill_expert_dataset(args, expert_eps)
-
+    
     acts = envs.single_action_space
     acts.low = np.ones_like(acts.low) * -1
     acts.high = np.ones_like(acts.high) # need to normalize actions 
@@ -530,45 +560,7 @@ if __name__ == "__main__":
     state = None
 
 
-    if not args.offline_traindir:
-        prefill = max(0, args.prefill - count_steps(args.traindir))
-        print(f"Prefill dataset ({prefill} steps).")
-        if hasattr(acts, "discrete"):
-            random_actor = tools.OneHotDist(
-                torch.zeros(args.num_actions).repeat(args.num_envs, 1)
-            )
-        else:
-            random_actor = torchd.independent.Independent(
-                torchd.uniform.Uniform(
-                    torch.tensor(acts.low).repeat(args.num_envs, 1),
-                    torch.tensor(acts.high).repeat(args.num_envs, 1),
-                ),
-                1,
-            )
-
-        def random_agent(o, d, s):
-            action = random_actor.sample()
-            logprob = random_actor.log_prob(action)
-            return {"action": action, "logprob": logprob}, None
-
-        state = tools.simulate(
-            random_agent,
-            envs,
-            train_eps,
-            args.traindir,
-            logger,
-            limit=args.dataset_size,
-            steps=prefill,
-        )
-        logger.step += prefill * args.action_repeat
-        print(f"Logger: ({logger.step} steps).")
-
-    print("Simulate agent.")
-    
-    
-
     train_dataset = make_dataset(train_eps, args)
-    eval_dataset = make_dataset(eval_eps, args)
     expert_dataset = make_dataset(expert_eps, args)
 
     agent = Dreamer(
@@ -580,46 +572,31 @@ if __name__ == "__main__":
         expert_dataset=expert_dataset,
     ).to(args.device)
     agent.requires_grad_(requires_grad=False)
-    if (logdir / "latest.pt").exists():
-        checkpoint = torch.load(logdir / "latest.pt")
-        agent.load_state_dict(checkpoint["agent_state_dict"])
-        tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
-        agent._should_pretrain._once = False
+    checkpoint = torch.load("/home/kensuke/ManiSkill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer_edit__1__1753385494/wm_lz.pt")
+    agent.load_state_dict(checkpoint["agent_state_dict"])
+    tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
+    agent._should_pretrain._once = False
 
-    # make sure eval will be executed once after args.steps
-    while agent._step < args.steps + args.eval_every:
-        logger.write()
-        if args.eval_episode_num > 0:
-            print("Start evaluation.")
-            eval_policy = functools.partial(agent, training=False)
-            tools.simulate(
-                eval_policy,
-                eval_envs,
-                eval_eps,
-                args.evaldir,
-                logger,
-                is_eval=True,
-                episodes=args.eval_episode_num,
-            )
-            if args.video_pred_log:
-                video_pred = agent._wm.video_pred(next(eval_dataset))
-                logger.video("eval_openl", to_np(video_pred))
-        print("Start training.")
-        state = tools.simulate(
-            agent,
-            envs,
-            train_eps,
-            args.traindir,
-            logger,
-            limit=args.dataset_size,
-            steps=args.eval_every,
-            state=state,
-        )
-        items_to_save = {
-            "agent_state_dict": agent.state_dict(),
-            "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
-        }
-        torch.save(items_to_save, logdir / "latest.pt")
+    eval_policy = functools.partial(agent, training=False)
+    envs.reset()
+    test_eps = collections.OrderedDict()
+    test_dataset = make_dataset(test_eps, args)
+
+    eval_policy = functools.partial(agent, training=False)
+    tools.simulate(
+        eval_policy,
+        envs,
+        test_eps,
+        args.evaldir,
+        logger,
+        is_eval=True,
+        episodes=100,
+    ) 
+
+    print("GP metrics", agent.gp_metrics)
+    print("No GP metrics", agent.nogp_metrics)
+    video_pred = agent._wm.video_pred(next(test_dataset))
+    logger.video("eval_openl", to_np(video_pred))
     for env in envs + eval_envs:
         try:
             env.close()

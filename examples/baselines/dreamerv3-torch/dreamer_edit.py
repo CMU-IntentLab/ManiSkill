@@ -191,8 +191,9 @@ class Args:
     gamma_lx: float = 0.75
     offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     pretrain: int = 500
-    hybrid_steps: int = 300_000
-    hybrid: bool = True
+    pretrain: int = 500
+    hybrid_steps: int = 0
+    hybrid: bool = False #True
 from typing import Dict, Any, Union
 
 def combine_dictionaries(
@@ -328,6 +329,14 @@ class Dreamer(nn.Module):
         if self._args.eval_state_mean:
             latent["stoch"] = latent["mean"]
         feat = self._wm.dynamics.get_feat(latent)
+
+        gp = self._wm.heads["margin_gp"](feat)
+        no_gp = self._wm.heads["margin_nogp"](feat)
+        reward = self._wm.heads["reward"](feat).mode()
+        print('reward', reward.shape, reward)
+        print('fail', obs['failure'], obs['failure'].shape)
+        print('gp', gp.shape, gp)
+        print('no_gp', no_gp.shape, no_gp)
         if not training:
             actor = self._task_behavior.actor(feat)
             action = actor.mode()
@@ -337,6 +346,11 @@ class Dreamer(nn.Module):
         else:
             actor = self._task_behavior.actor(feat)
             action = actor.sample()
+        
+        # add noise to the action to avoid overfitting the l(z)
+        action += torch.randn_like(action)*0.2
+
+
         logprob = actor.log_prob(action)
         latent = {k: v.detach() for k, v in latent.items()}
         action = action.detach()
@@ -352,20 +366,21 @@ class Dreamer(nn.Module):
         metrics = {}
         if self.hybrid and self._step < self._args.hybrid_steps:
             mixed_data = combine_dictionaries(data, expert_data, take_half=True)
-            post, context, mets = self._wm._train(mixed_data)
+            _, _, mets = self._wm._train_margins(mixed_data)
         else:
-            post, context, mets = self._wm._train(data)
+            _, _, mets = self._wm._train_margins(data)
         metrics.update(mets)
 
 
-        start = self._wm._get_post(data) #post
+        '''start = self._wm._get_post(data) #post
         reward = lambda f, s, a: self._wm.heads["reward"](
             self._wm.dynamics.get_feat(s)
         ).mode()
         metrics.update(self._task_behavior._train(start, reward)[-1])
         if self._args.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
-            metrics.update({"expl_" + key: value for key, value in mets.items()})
+            metrics.update({"expl_" + key: value for key, value in mets.items()})'''
+        
         for name, value in metrics.items():
             if not name in self._metrics.keys():
                 self._metrics[name] = [value]
@@ -528,8 +543,6 @@ if __name__ == "__main__":
     args.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 
     state = None
-
-
     if not args.offline_traindir:
         prefill = max(0, args.prefill - count_steps(args.traindir))
         print(f"Prefill dataset ({prefill} steps).")
@@ -562,11 +575,9 @@ if __name__ == "__main__":
         )
         logger.step += prefill * args.action_repeat
         print(f"Logger: ({logger.step} steps).")
-
     print("Simulate agent.")
     
     
-
     train_dataset = make_dataset(train_eps, args)
     eval_dataset = make_dataset(eval_eps, args)
     expert_dataset = make_dataset(expert_eps, args)
@@ -580,12 +591,15 @@ if __name__ == "__main__":
         expert_dataset=expert_dataset,
     ).to(args.device)
     agent.requires_grad_(requires_grad=False)
-    if (logdir / "latest.pt").exists():
-        checkpoint = torch.load(logdir / "latest.pt")
-        agent.load_state_dict(checkpoint["agent_state_dict"])
-        tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
-        agent._should_pretrain._once = False
 
+    checkpoint = torch.load("/home/kensuke/ManiSkill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer__1__1753312973/latest.pt")
+    state_dict = checkpoint["agent_state_dict"]
+    # remove all weights associated with wm.heads.margin
+    state_dict = {k: v for k, v in state_dict.items() if "margin" not in k}
+    agent.load_state_dict(state_dict, strict=False)
+    agent._wm.remake_margin()
+    print('success')
+    
     # make sure eval will be executed once after args.steps
     while agent._step < args.steps + args.eval_every:
         logger.write()

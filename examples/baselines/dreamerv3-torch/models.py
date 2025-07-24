@@ -74,23 +74,25 @@ class WorldModel(nn.Module):
         )
         self.heads["margin_nogp"] = networks.MLP(
             feat_size,
-            None,
+            (),
             config.margin_head["layers"],
             config.units,
             config.act,
             config.norm,
             device=config.device,
+            return_dist = False,
             name="Margin NoGP",
         )
 
         self.heads["margin_gp"] = networks.MLP(
             feat_size,
-            None,
+            (),
             config.margin_head["layers"],
             config.units,
             config.act,
             config.norm,
             device=config.device,
+            return_dist = False,
             name="Margin GP",
         )
 
@@ -166,6 +168,70 @@ class WorldModel(nn.Module):
             reward=config.reward_head["loss_scale"],
             cont=config.cont_head["loss_scale"],
         )
+
+    def remake_margin(self):
+        config = self._config
+        if config.dyn_discrete:
+            feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
+        else:
+            feat_size = config.dyn_stoch + config.dyn_deter
+        self.heads["margin_nogp"] = networks.MLP(
+            feat_size,
+            (),
+            config.margin_head["layers"],
+            config.units,
+            config.act,
+            config.norm,
+            device=config.device,
+            return_dist = False,
+            name="Margin NoGP",
+        ).to(config.device)
+
+        self.heads["margin_gp"] = networks.MLP(
+            feat_size,
+            (),
+            config.margin_head["layers"],
+            config.units,
+            config.act,
+            config.norm,
+            device=config.device,
+            return_dist = False,
+            name="Margin GP",
+        ).to(config.device)
+
+        standard_kwargs = {
+                "lr": config.model_lr,
+                "eps": config.opt_eps,
+                "clip": config.grad_clip,
+                "wd": config.weight_decay,
+                "opt": config.opt,
+                "use_amp": self._use_amp,
+            }
+        margin_nogp_params = {
+                "params": list(self.heads["margin_nogp"].parameters())
+            }
+        margin_gp_params = {
+                "params": list(self.heads["margin_gp"].parameters())
+            }
+
+        self.margin_nogp_params = list(margin_nogp_params["params"])
+        self.margin_nogp_opt = tools.Optimizer(
+            "margin_nogp_opt", [margin_nogp_params], **standard_kwargs
+        )
+
+        self.margin_gp_params = list(margin_gp_params["params"])
+        self.margin_gp_opt = tools.Optimizer(
+            "margin_gp_opt", [margin_gp_params], **standard_kwargs
+        )
+
+        print(
+            f"Optimizer margin_nogp has {sum(p.numel() for p in self.margin_nogp_params)} trainable variables."
+        )
+
+        print(
+            f"Optimizer margin_gp has {sum(p.numel() for p in self.margin_gp_params)} trainable variables."
+        )
+        
     def _get_post(self, data):
         data = self.preprocess(data)
 
@@ -248,6 +314,104 @@ class WorldModel(nn.Module):
         unsafe_data = torch.where(data["failure"] == 1.)
         safe_dataset = feat_detached[safe_data]
         unsafe_dataset = feat_detached[unsafe_data]
+        #print(safe_dataset.shape, unsafe_dataset.shape)
+
+        with tools.RequiresGrad(self.heads["margin_gp"]):
+            with torch.amp.autocast("cuda", enabled=self._use_amp):
+                pos = self.heads["margin_gp"](safe_dataset)
+                neg = self.heads["margin_gp"](unsafe_dataset)
+                #print('gp', pos.shape, neg.shape)
+                N = max(pos.numel(), neg.numel())
+                gp_loss=torch.tensor(0., device=pos.device)
+                if pos.numel() > 0 and neg.numel() > 0:
+                    if N > safe_dataset.shape[0]:
+                        repeat_times = (N + safe_dataset.shape[0] - 1) // safe_dataset.shape[0]  # Ceiling division
+                        safe_repeated = safe_dataset.repeat((repeat_times,) + (1,) * (safe_dataset.dim() - 1))  # Repeat along batch dim
+                        indices = torch.randperm(safe_repeated.shape[0], device=safe_dataset.device)[:N]
+                        pos_data =  safe_repeated[indices]
+                    else:
+                        pos_data = safe_dataset
+                    if N > unsafe_dataset.shape[0]:
+                        repeat_times = (N + unsafe_dataset.shape[0] - 1) // unsafe_dataset.shape[0]  # Ceiling division
+                        unsafe_repeated = unsafe_dataset.repeat((repeat_times,) + (1,) * (unsafe_dataset.dim() - 1))  # Repeat along batch dim
+                        indices = torch.randperm(unsafe_repeated.shape[0], device=unsafe_dataset.device)[:N]
+                        neg_data =  unsafe_repeated[indices]
+                    else:
+                        neg_data = unsafe_dataset
+                    # gradient penalty
+                    alpha = torch.rand(pos_data.shape[0], 1, device=pos_data.device)
+                    interpolates = alpha * pos_data + (1 - alpha) * neg_data
+                    interpolates.requires_grad_(True)
+                    disc_interpolates = self.heads["margin_gp"](interpolates)
+
+                    gradients = torch.autograd.grad(
+                        outputs=disc_interpolates,
+                        inputs=interpolates,
+                        grad_outputs=torch.ones_like(disc_interpolates),
+                        create_graph=True,
+                        retain_graph=True,
+                        only_inputs=True,
+                    )[0]
+                    gradients = gradients.view(pos_data.shape[0], -1)
+                    gradients_norm = torch.sqrt(torch.sum(gradients**2, dim=1) + 1e-12)
+
+                    gp_loss = ((gradients_norm - 0.1) ** 2).mean()
+
+                pos_mean = pos.mean()
+                neg_mean = neg.mean()
+
+                zero_sum_loss = neg_mean - pos_mean
+                relu_loss = torch.relu(self._config.gamma_lx + neg_mean) + torch.relu(self._config.gamma_lx - pos_mean)
+
+                loss = 0.01*zero_sum_loss + relu_loss + 10 * gp_loss
+                
+                metrics.update(self.margin_gp_opt(loss, self.heads["margin_gp"].parameters()))
+                metrics["margin_gp"] = gp_loss.item()
+                metrics["sign_loss"] = to_np(relu_loss)
+                metrics["gp_loss"] = to_np(gp_loss)
+
+        with tools.RequiresGrad(self.heads["margin_nogp"]):
+            with torch.amp.autocast("cuda", enabled=self._use_amp):
+                pos = self.heads["margin_nogp"](safe_dataset)
+                neg = self.heads["margin_nogp"](unsafe_dataset)
+                #print('nogp', pos.shape, neg.shape)
+                gamma = self._config.gamma_lx
+                lx_loss = 0.0
+                if pos.numel() > 0:
+                    lx_loss += torch.relu(gamma - pos).mean()
+                if neg.numel() > 0:
+                    lx_loss += torch.relu(gamma + neg).mean()
+
+                #lx_loss *= 10
+
+                metrics["margin_nogp"] = lx_loss.item()
+                metrics.update(self.margin_nogp_opt(lx_loss, self.heads["margin_nogp"].parameters()))
+    
+
+
+        return post, context, metrics
+
+    def _train_margins(self, data):
+        # action (batch_size, batch_length, act_dim)
+        # image (batch_size, batch_length, h, w, ch)
+        # reward (batch_size, batch_length)
+        # discount (batch_size, batch_length)
+        data = self.preprocess(data)
+
+        with tools.RequiresGrad(self):
+            with torch.amp.autocast(device_type='cuda', enabled=self._use_amp):
+                embed = self.encoder(data)
+                post, _ = self.dynamics.observe(
+                    embed, data["action"], data["is_first"]
+                )
+                
+        post = {k: v.detach() for k, v in post.items()}
+
+        feat_detached = self.dynamics.get_feat(post).detach()
+        safe_data = torch.where(data["failure"] == 0.)
+        unsafe_data = torch.where(data["failure"] == 1.)
+        safe_dataset = feat_detached[safe_data]
+        unsafe_dataset = feat_detached[unsafe_data]
 
         with tools.RequiresGrad(self.heads["margin_gp"]):
             with torch.amp.autocast("cuda", enabled=self._use_amp):
@@ -296,10 +460,11 @@ class WorldModel(nn.Module):
                 relu_loss = torch.relu(self._config.gamma_lx + neg_mean) + torch.relu(self._config.gamma_lx - pos_mean)
 
                 loss = 0.01*zero_sum_loss + relu_loss + 10 * gp_loss
-                
-                metrics["margin_gp"] = gp_loss.item()
-                metrics.update(self.margin_gp_opt(loss, self.heads["margin_gp"].parameters()))
 
+                self._model_opt(torch.mean(loss), self.parameters())
+                metrics = self.margin_gp_opt(loss, self.heads["margin_gp"].parameters())
+
+                metrics["margin_gp"] = gp_loss.item()
                 metrics["sign_loss"] = to_np(relu_loss)
                 metrics["gp_loss"] = to_np(gp_loss)
 
@@ -307,7 +472,7 @@ class WorldModel(nn.Module):
             with torch.amp.autocast("cuda", enabled=self._use_amp):
                 pos = self.heads["margin_nogp"](safe_dataset)
                 neg = self.heads["margin_nogp"](unsafe_dataset)
-                
+                #print('nogp', pos.shape, neg.shape)
                 gamma = self._config.gamma_lx
                 lx_loss = 0.0
                 if pos.numel() > 0:
@@ -315,14 +480,12 @@ class WorldModel(nn.Module):
                 if neg.numel() > 0:
                     lx_loss += torch.relu(gamma + neg).mean()
 
-                #lx_loss *= 10
-
-                metrics["margin_nogp"] = lx_loss.item()
                 metrics.update(self.margin_nogp_opt(lx_loss, self.heads["margin_nogp"].parameters()))
-    
+                metrics["margin_nogp"] = lx_loss.item()
 
 
-        return post, context, metrics
+
+        return post, None, metrics
 
     # this function is called during both rollout and training
     def preprocess(self, obs):

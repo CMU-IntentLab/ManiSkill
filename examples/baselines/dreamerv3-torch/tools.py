@@ -67,7 +67,7 @@ class Logger:
         self.step = step
         name = str(logdir)#.split('/')[-2] + '_' + str(logdir).split('/')[-1]
         # Initialize WandB
-        wandb.init(project="isaaclab-wm", config={"logdir": str(logdir)}, name=name)
+        wandb.init(project="wm-test", config={"logdir": str(logdir)}, name=name)
 
     def config(self, config_dict):
         # Convert PosixPath objects to strings
@@ -221,6 +221,8 @@ def simulate(
 
     step, episode = 0, 0
     obs_vec, info = envs.reset()
+    obs_vec['failure'] = info['is_knocked_over']
+
     agent_state = None
 
     length = np.zeros(envs.num_envs, np.int32)

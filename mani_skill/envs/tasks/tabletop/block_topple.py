@@ -181,11 +181,10 @@ class BlockToppleEnv(BaseEnv):
     
     def object_upright_penalty(self, scale: float = 0.005, threshold: float = 0.1) -> torch.Tensor:
         """
-        Returns a smooth uprightness penalty for early tilt detection without dominating loss.
-
-        Applies only above a threshold, saturates at full tilt.
-        Max unscaled penalty per step ≈ 1.0 (for full 90° tilt on both axes),
-        so recommended scale is ~0.001–0.005 depending on desired shaping strength.
+        Reward small tilts (nudges), penalize large ones.
+        - reward_scale: reward when tilt < threshold
+        - penalty_scale: penalty when tilt ≥ threshold
+        - threshold: cutoff tilt angle in radians (~0.1 rad = 6°)
         """
         left_quat = self.block1.pose.q
         right_quat = self.block2.pose.q
@@ -197,23 +196,29 @@ class BlockToppleEnv(BaseEnv):
             rotation_conversions.quaternion_to_matrix(right_quat), convention="XYZ"
         )
 
+        # X and Y tilt
         left_dev = left_euler[:, :2]
         right_dev = right_euler[:, :2]
 
-        # Subtract threshold, zero-out small tilts
-        left_excess = torch.clamp(left_dev.abs() - threshold, min=0.0)
-        right_excess = torch.clamp(right_dev.abs() - threshold, min=0.0)
+        # Magnitude of tilt deviation
+        left_mag = torch.norm(left_dev, dim=-1)  # shape (N,)
+        right_mag = torch.norm(right_dev, dim=-1)
 
-        # Compute smooth squared penalty
-        left_penalty = torch.norm(left_excess, dim=-1)
-        right_penalty = torch.norm(right_excess, dim=-1)
-        penalty = left_penalty + right_penalty
+        # Create piecewise reward
+        left_reward = torch.where(
+            left_mag < threshold, 1*scale, -1*scale
+        )
+        left_reward = torch.where(
+            left_mag < 0.01, 0, left_reward
+        )
+        right_reward = torch.where(
+            right_mag < threshold, 1*scale, -1*scale
+        )
+        right_reward = torch.where(
+            right_mag < 0.01, 0, right_reward
+        )
 
-        # Normalize so max penalty = 1.0 (when both blocks fully flat in both axes)
-        max_norm = 2 * np.sqrt(2) * (np.pi/2 - threshold)
-        normalized = penalty / max_norm
-        normalized = torch.clamp(normalized, max=1.0)
-        return normalized * scale
+        return left_reward + right_reward
 
     def evaluate(self):
         # object lifted above a threshold
@@ -249,7 +254,7 @@ class BlockToppleEnv(BaseEnv):
         reward += is_grasped
 
         # Lifting reward (only when grasped)
-        obj_to_goal_dist = torch.clamp((self.height + 0.05) - self.block3.pose.p[:, 2], min=0.0)
+        obj_to_goal_dist = torch.clamp((self.height + self.height/2) - self.block3.pose.p[:, 2], min=0.0)
         dist_reward = 1 - torch.tanh(5 * obj_to_goal_dist)
         reward += dist_reward * is_grasped 
 
@@ -264,22 +269,23 @@ class BlockToppleEnv(BaseEnv):
         reward += static_reward * info["is_obj_lifted"]
 
         # Joint velocity regularization
-        joint_vel_pen = torch.linalg.norm(qvel, axis=1)  * 0.05
+        joint_vel_pen = torch.linalg.norm(qvel, axis=1)  * 0.2
         reward -= joint_vel_pen
+        
         # Penalty for knocking over the block
-        reward -= info["is_knocked_over"]*0.5
+        #safety_cost = info["is_knocked_over"]*0.05
+        #reward -= safety_cost
+        
         # action magnitude reward
         ac_rew = torch.linalg.norm(action[:, :6], axis=1) * 0.5
         reward -= ac_rew
-        upright_penalty = self.object_upright_penalty(scale=0.01)
-        print(upright_penalty.mean())
-        reward -= upright_penalty
+        
+        upright_penalty = self.object_upright_penalty(scale=0.1)
+        reward += upright_penalty
 
-        #print(info["success"]) # bool
-        #print(info["is_knocked_over"]) # 0. or 1. 
-        #print(reward.shape, reward.dtype)
+        
         success_mask = info["success"]
-        reward[success_mask] = 4.0 - info["is_knocked_over"][success_mask]*0.5 - joint_vel_pen[success_mask] - ac_rew[success_mask]
+        reward[success_mask] = 4.0 - joint_vel_pen[success_mask] - ac_rew[success_mask]# - safety_cost[success_mask]
         return reward
 
     def compute_normalized_dense_reward(
