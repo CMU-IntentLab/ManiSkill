@@ -32,6 +32,6 @@ from gymnasium.envs.registration import (
 register(
     id="BlockToppleWM-v0",
     entry_point="mani_skill.envs.tasks.tabletop.block_topple_wm:BlockToppleWMEnv",
-    max_episode_steps=16,
+    max_episode_steps=8,
     reward_threshold=1e8,
 )

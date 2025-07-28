@@ -84,7 +84,7 @@ class BlockToppleWMEnv(gym.Env):
         
         feat = self.wm.dynamics.get_feat(state).detach()
         with torch.no_grad():  # Disable gradient calculation
-            outputs = torch.tanh(self.wm.heads["margin_nogp"](feat))
+            outputs = torch.tanh(self.wm.heads["margin_gp"](feat))
             g_xList.append(outputs.detach().cpu().numpy())
         
         safety_margin = np.array(g_xList).squeeze()

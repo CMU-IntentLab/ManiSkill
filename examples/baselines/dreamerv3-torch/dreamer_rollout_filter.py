@@ -242,7 +242,8 @@ class Args:
     warm_start_path: str = None # type=str, default=None)
     kwargs: Dict[str, Any] = field(default_factory=lambda: {}) # type=str, default="")
 
-    filter_directory: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/nogp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_0/epoch_id_12/policy.pth'
+    #filter_directory: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/nogp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_0/epoch_id_12/policy.pth'
+    filter_directory: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/gp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_0/epoch_id_3/policy.pth'
 
 from typing import Dict, Any, Union
 
@@ -387,6 +388,8 @@ class Dreamer(nn.Module):
         obs = self._wm.preprocess(obs)
         embed = self._wm.encoder(obs)
         latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
+
+        
         if self._args.eval_state_mean:
             latent["stoch"] = latent["mean"]
         feat = self._wm.dynamics.get_feat(latent)
@@ -481,6 +484,17 @@ def Q(state, policy, action):
     tmp = policy.critic(tmp_batch.obs, action)
     return tmp.cpu().detach().numpy().flatten()
 
+def Q_v2(latent, action, agent):
+    if isinstance(action, dict):
+        action = action['action']
+    action = torch.tensor(action, dtype=torch.float32).to(latent['stoch'].device)
+    img_latent = agent._wm.dynamics.img_step(latent, action)
+    if agent._args.eval_state_mean:
+        img_latent["stoch"] = img_latent["mean"]
+
+    img_feat = agent._wm.dynamics.get_feat(img_latent).cpu().detach().numpy()
+    return V(img_feat, safe_policy)
+
 def pi_safe(state, policy):
     tmp_obs = np.array(state)#.reshape(1,-1)
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
@@ -502,6 +516,7 @@ def rollout_policy(
     done_vec = np.zeros(envs.num_envs, bool)
 
     agent_state = None
+    
     # statistics from the offline dataset
     max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
     min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
@@ -509,13 +524,10 @@ def rollout_policy(
     while episode < num_trajs:
         action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
 
-        # agent_state is a tuple of (latent, action)
-        # latent is a dict with keys stoch, deter, and discrete
-
-        #last_latent = {k: v.detach() for k, v in agent_state[0].items()}
         feat = agent._wm.dynamics.get_feat(agent_state[0]).cpu().detach().numpy()
 
-        
+        l_gp = torch.tanh(agent._wm.heads['margin_gp'](agent._wm.dynamics.get_feat(agent_state[0])))
+        l_nogp = torch.tanh(agent._wm.heads['margin_nogp'](agent._wm.dynamics.get_feat(agent_state[0])))
 
         # action is a dict with keys action and logprob        
         if isinstance(action, dict):
@@ -525,17 +537,21 @@ def rollout_policy(
 
         ac_safe = pi_safe(feat, safe_policy)
         ac_safe = (ac_safe + 1) * 0.5 * (max_ac - min_ac) + min_ac
-        print(ac_safe)
         val = V(feat, safe_policy)[0] # this is just to check the shape of feat
         print('value', val)
-        qval = Q(feat, safe_policy, action)[0] # this is just to check the shape of feat
+
+        ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
+        qval = Q(feat, safe_policy, ac_norm)[0] # this is just to check the shape of feat
         print('qvalue', qval)
+        qval2 = Q_v2(agent_state[0], ac_norm, agent)[0] 
+        print('qvalue2', qval2)
 
 
-        if qval < 0.2:
+        if min(qval, qval2) < 0.6:
             print('action is unsafe, using safe policy')
+            print('action', action['action'])
+            print('safe action', ac_safe)
             action['action'] = torch.tensor(ac_safe, dtype=torch.float32).to(envs.device)
-            print('safe action', action['action'])
 
 
         obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
@@ -742,7 +758,7 @@ if __name__ == "__main__":
 
     policy = functools.partial(agent, training=False)
 
-    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=2)
+    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=1)
     envs.reset()
     print("GP metrics", agent.gp_metrics)
     print("No GP metrics", agent.nogp_metrics)
