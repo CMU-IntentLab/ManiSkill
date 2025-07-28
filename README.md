@@ -3,15 +3,15 @@
 checkpoints: https://drive.google.com/drive/folders/1WPwGFUdi1qxY_u2vxhaaAsdczpHZTEW-?usp=drive_link
 
 
-python 3.10
-pip install -e .
-also you will want to install PyHJ https://github.com/CMU-IntentLab/PytorchReachability/tree/main (feel free to delete deepreach/dreamer folders in PytorchReachability)
+- python 3.10
+- pip install -e .
+- also you will want to install PyHJ https://github.com/CMU-IntentLab/PytorchReachability/tree/main (feel free to delete deepreach/dreamer folders in PytorchReachability)
 
 for testing the safety filter, 
-cd /examples/baselines/dreamerv3-torch
-python dreamer_rollout_filter.py
--> make sure to fill in the wm_directory and filter_directory in the Args dataclass
--> function to edit is `rollout_policy`
+- cd /examples/baselines/dreamerv3-torch
+- python dreamer_rollout_filter.py
+- -> make sure to fill in the wm_directory and filter_directory in the Args dataclass
+- -> function to edit is `rollout_policy`
 
 
 
