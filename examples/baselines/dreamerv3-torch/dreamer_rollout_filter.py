@@ -35,6 +35,8 @@ from PyHJ.utils.net.common import Net
 from PyHJ.utils.net.continuous import Actor, Critic
 from PyHJ.exploration import GaussianNoise
 from PyHJ.data import Batch
+
+import h5py
 to_np = lambda x: x.detach().cpu().numpy()
 
 @dataclass
@@ -57,7 +59,7 @@ class Args:
     """the group of the run for wandb"""
     capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_trajectory: bool = False
+    save_trajectory: bool = True
     """whether to save trajectory data into the `videos` folder"""
     save_model: bool = True
     """whether to save model into the `runs/{run_name}` folder"""
@@ -399,7 +401,7 @@ class Dreamer(nn.Module):
         gp = self._wm.heads["margin_gp"](feat)[0].item()
         no_gp = self._wm.heads["margin_nogp"](feat)[0].item()
 
-
+        '''
         # metrics are TN, FP, TP, FN
         if obs['failure'].item() == 1 and gp < 0: # TN
             self.gp_metrics += np.array([1, 0, 0, 0])
@@ -417,7 +419,7 @@ class Dreamer(nn.Module):
         if obs['failure'].item() == 0 and gp > 0: # TP
             self.gp_metrics += np.array([0, 0, 1, 0])
         if obs['failure'].item() == 0 and no_gp > 0:
-            self.nogp_metrics += np.array([0, 0, 1, 0])
+            self.nogp_metrics += np.array([0, 0, 1, 0])'''
 
         #print('fail', obs['failure'].item(), 'gp', gp, 'no_gp', no_gp)
         if not training:
@@ -500,6 +502,92 @@ def pi_safe(state, policy):
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
     return policy(tmp_batch, model="actor_old").act.cpu().detach().numpy()#.flatten()
 
+
+def replay_policy(nom_policy,
+    safe_policy,
+    agent,
+    envs,
+    traj_path):
+
+    with h5py.File(traj_path, 'r') as f:
+        traj = f['traj_0']
+        traj_len = traj['actions'].shape[0]
+        state = traj['obs']['state'][:]
+        wrist_cam = traj['obs']['wrist_cam'][:]
+        front_cam = traj['obs']['front_cam'][:]
+        actions = traj['actions'][:]
+        is_first = traj['obs']['is_first'][:]
+        is_last = traj['obs']['is_last'][:]
+        is_terminal = traj['obs']['is_terminal'][:]
+
+
+        # initial observation from env.reset()
+        obs_vec = {
+                'state': torch.tensor(state[0], dtype=torch.float32).unsqueeze(0).to(envs.device),
+                'wrist_cam': torch.tensor(wrist_cam[0], dtype=torch.float32).unsqueeze(0).to(envs.device),
+                'front_cam': torch.tensor(front_cam[0], dtype=torch.float32).unsqueeze(0).to(envs.device),
+                'is_first': torch.tensor([is_first[0]], dtype=torch.bool).to(envs.device),
+                'is_last': torch.tensor([is_last[0]], dtype=torch.bool).to(envs.device),
+                'is_terminal': torch.tensor([is_terminal[0]], dtype=torch.bool).to(envs.device),
+            }
+        done_vec = torch.tensor([False], dtype=torch.bool).to(envs.device)
+        
+        
+        agent_state = None
+        # statistics from the offline dataset
+        max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
+        min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
+        
+        
+        for i in range(traj_len):
+            action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
+            action['action'] = torch.tensor(actions[i], dtype=torch.float32).to(envs.device).unsqueeze(0)
+            agent_state = (agent_state[0], torch.tensor(actions[i], dtype=torch.float32).to(envs.device).unsqueeze(0)) # add action to agent state
+            feat = agent._wm.dynamics.get_feat(agent_state[0]).cpu().detach().numpy()
+
+            l_gp = torch.tanh(agent._wm.heads['margin_gp'](agent._wm.dynamics.get_feat(agent_state[0])))
+            l_nogp = torch.tanh(agent._wm.heads['margin_nogp'](agent._wm.dynamics.get_feat(agent_state[0])))
+
+            # action is a dict with keys action and logprob        
+            if isinstance(action, dict):
+                action = {k: np.array(action[k].detach().cpu()) for k in action}
+            else:
+                action = np.array(action)
+
+            ac_safe = pi_safe(feat, safe_policy)
+            ac_safe = (ac_safe + 1) * 0.5 * (max_ac - min_ac) + min_ac
+            val = V(feat, safe_policy)[0] # this is just to check the shape of feat
+            print('value', val)
+
+            ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
+            qval = Q(feat, safe_policy, ac_norm)[0] # this is just to check the shape of feat
+            print('qvalue', qval)
+            qval2 = Q_v2(agent_state[0], ac_norm, agent)[0] 
+            print('qvalue2', qval2)
+
+            '''
+            if min(qval, qval2) < 0.6:
+                print('action is unsafe, using safe policy')
+                print('action', action['action'])
+                print('safe action', ac_safe)
+                action['action'] = torch.tensor(ac_safe, dtype=torch.float32).to(envs.device)'''
+
+
+            obs_vec = {
+                'state': torch.tensor(state[i+1], dtype=torch.float32).unsqueeze(0).to(envs.device),
+                'wrist_cam': torch.tensor(wrist_cam[i+1], dtype=torch.float32).unsqueeze(0).to(envs.device),
+                'front_cam': torch.tensor(front_cam[i+1], dtype=torch.float32).unsqueeze(0).to(envs.device),
+                'is_first': torch.tensor([is_first[i+1]], dtype=torch.bool).to(envs.device),
+                'is_last': torch.tensor([is_last[i+1]], dtype=torch.bool).to(envs.device),
+                'is_terminal': torch.tensor([is_terminal[i+1]], dtype=torch.bool).to(envs.device),
+            }
+            term_vec = obs_vec['is_terminal']
+            trunc_vec = obs_vec['is_last']
+
+            done_vec = term_vec | trunc_vec
+
+        print('trajectory length', traj_len)
+
 def rollout_policy(
     nom_policy,
     safe_policy,
@@ -546,12 +634,12 @@ def rollout_policy(
         qval2 = Q_v2(agent_state[0], ac_norm, agent)[0] 
         print('qvalue2', qval2)
 
-
+        '''
         if min(qval, qval2) < 0.6:
             print('action is unsafe, using safe policy')
             print('action', action['action'])
             print('safe action', ac_safe)
-            action['action'] = torch.tensor(ac_safe, dtype=torch.float32).to(envs.device)
+            action['action'] = torch.tensor(ac_safe, dtype=torch.float32).to(envs.device)'''
 
 
         obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
@@ -609,6 +697,16 @@ if __name__ == "__main__":
 
     envs = DreamerWrapper(envs)
     eval_envs = DreamerWrapper(eval_envs)
+    if args.capture_video or args.save_trajectory:
+        eval_output_dir = f"runs/{run_name}/videos"
+        if args.evaluate:
+            eval_output_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
+        print(f"Saving eval trajectories/videos to {eval_output_dir}")
+    if args.save_train_video_freq is not None:
+        save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
+        envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=max_episode_steps, video_fps=30)
+    eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory, save_video=args.capture_video, trajectory_name="trajectory", max_steps_per_video=max_episode_steps, video_fps=30)
+
     envs = SelectAction(envs)
     eval_envs = SelectAction(eval_envs)
     envs = UUID(envs)
@@ -617,15 +715,7 @@ if __name__ == "__main__":
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
         eval_envs = FlattenActionSpaceWrapper(eval_envs)
-    if args.capture_video or args.save_trajectory:
-        eval_output_dir = f"runs/{run_name}/videos"
-        if args.evaluate:
-            eval_output_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
-        print(f"Saving eval trajectories/videos to {eval_output_dir}")
-        if args.save_train_video_freq is not None:
-            save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
-            envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=max_episode_steps, video_fps=30)
-        eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory, save_video=args.capture_video, trajectory_name="trajectory", max_steps_per_video=max_episode_steps, video_fps=30)
+    
     envs = ManiSkillVectorEnv(envs, args.num_envs, ignore_terminations=not args.partial_reset, record_metrics=True)
     eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
@@ -758,10 +848,13 @@ if __name__ == "__main__":
 
     policy = functools.partial(agent, training=False)
 
-    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=1)
-    envs.reset()
-    print("GP metrics", agent.gp_metrics)
-    print("No GP metrics", agent.nogp_metrics)
+    
+    #rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=1)
+    #envs.reset()
+    print('replay')
+    replay_policy(policy, safe_policy, agent, eval_envs, '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/FilterRollout/videos/trajectory.h5')
+    #print("GP metrics", agent.gp_metrics)
+    #print("No GP metrics", agent.nogp_metrics)
 
 
 
