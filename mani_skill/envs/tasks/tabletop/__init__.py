@@ -18,3 +18,20 @@ from .push_t import PushTEnv
 from .pull_cube_tool import PullCubeToolEnv
 from .stack_pyramid import StackPyramidEnv
 from .block_topple import BlockToppleEnv
+from .block_topple_wm import BlockToppleWMEnv
+
+from gymnasium.envs.registration import (
+    load_plugin_envs,
+    make,
+    pprint_registry,
+    register,
+    registry,
+    spec,
+)
+
+register(
+    id="BlockToppleWM-v0",
+    entry_point="mani_skill.envs.tasks.tabletop.block_topple_wm:BlockToppleWMEnv",
+    max_episode_steps=16,
+    reward_threshold=1e8,
+)

@@ -3,8 +3,8 @@ from collections import defaultdict
 import os
 import random
 import time
-from dataclasses import dataclass
-from typing import Optional, Dict, List, Any
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
 
 import gymnasium as gym
 import numpy as np
@@ -29,12 +29,17 @@ import collections
 import models
 import functools
 from torch import distributions as torchd
+from gymnasium import spaces
 
+from PyHJ.utils.net.common import Net
+from PyHJ.utils.net.continuous import Actor, Critic
+from PyHJ.exploration import GaussianNoise
+from PyHJ.data import Batch
 to_np = lambda x: x.detach().cpu().numpy()
 
 @dataclass
 class Args:
-    exp_name: Optional[str] = None
+    exp_name: Optional[str] = "FilterRollout"
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
@@ -72,9 +77,9 @@ class Args:
     """whether to include the state in the observation"""
     env_vectorization: str = "gpu"
     """the type of environment vectorization to use"""
-    num_envs: int = 16
+    num_envs: int = 1
     """the number of parallel environments"""
-    num_eval_envs: int = 10
+    num_eval_envs: int = 1
     """the number of parallel evaluation environments"""
     partial_reset: bool = False
     """whether to let parallel environments reset upon termination instead of truncation"""
@@ -97,8 +102,7 @@ class Args:
     render_mode: str = "all"
     """the environment rendering mode"""
 
-    partial_reset: bool = False
-    """whether to let parallel environments reset upon termination instead of truncation"""
+    
     camera_width: Optional[int] = None
     """the width of the camera image. If none it will use the default the environment specifies"""
     camera_height: Optional[int] = None
@@ -120,16 +124,12 @@ class Args:
     precision: int =  32
     debug: bool =  False
     video_pred_log: bool =  True
-    precision: int = 32
     action_repeat: int = 1
-    steps = int = 10_000_000
+    steps: int = 10_000_000
 
-    eval_every: int = 10_000
-    log_every: int = 10_000
     #time_limit: int = 1e3
     offline_traindir: str = ''
     offline_evaldir: str = ''
-    reset_every: int = 0
 
     dyn_hidden: int = 512
     dyn_deter: int = 512
@@ -188,12 +188,6 @@ class Args:
     imag_gradient_mix: float =  0.0
     eval_state_mean: bool = False
 
-    gamma_lx: float = 0.75
-    offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
-    pretrain: int = 500
-    pretrain: int = 500
-    hybrid_steps: int = 0
-    hybrid: bool = False #True
 
     encoder: Dict[str, Any] = field(default_factory=lambda:{'mlp_keys': 'state', 'cnn_keys': '.*\_cam$', 'act': 'SiLU', 'norm': True, 'cnn_depth': 32, 'kernel_size': 4, 'minres': 4, 'mlp_layers': 5, 'mlp_units': 1024, 'symlog_inputs': True})
     decoder: Dict[str, Any] = field(default_factory=lambda:{'mlp_keys': 'state', 'cnn_keys': '.*\_cam$', 'act': 'SiLU', 'norm': True, 'cnn_depth': 32, 'kernel_size': 4, 'minres': 4, 'mlp_layers': 5, 'mlp_units': 1024, 'cnn_sigmoid': False, 'image_dist': 'mse', 'vector_dist': 'symlog_mse', 'outscale': 1.0})
@@ -213,42 +207,42 @@ class Args:
     wm_directory: str = "/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer_edit__1__1753385494/wm_lz.pt"
     filter_directory: str = ''
 
-    # LCRL
-    reward_threshold: null
-    seed: 0
-    buffer_size: 40000
-    actor_lr: 1e-4
-    critic_lr: 1e-3
-    gamma_pyhj: 0.9999 # type=float, default=0.95)
-    tau: 0.005 # type=float, default=0.005)
-    exploration_noise: 0.1 # type=float, default=0.1)
-    epoch: 1 # type=int, default=10)
-    total_episodes: 60 # type=int, default=160)
-    step_per_epoch: 40000 # type=int, default=40000)
-    step_per_collect: 8 # type=int, default=8)
-    update_per_step: 0.125 # type=float, default=0.125)
-    batch_size_pyhj: 512 # type=int, default=512)
-    control_net: [512, 512, 512, 512] # type=int, nargs="*", default=None) # for control policy
-    critic_net: [512, 512, 512, 512]  # type=int, nargs="*", default=None) # for critic net
-    training_num: 1 # type=int, default=8)
-    test_num: 1 # type=int, default=100)
-    render: 0. # type=float, default=0.)
-    rew_norm: False # action="store_true", default=False)
-    n_step: 1 # type=int, default=1)
-    continue_training_logdir: None # type=str, default=None)
-    continue_training_epoch: None # type=int, default=None)
-    actor_gradient_steps: 1 # type=int, default=1)
-    is_game_baseline: False # type=bool, default=False) # it will be set automatically
-    target_update_freq: 400 # type=int, default=400)
-    auto_alpha: 1
-    alpha_lr: 3e-4
-    alpha: 0.2
-    weight_decay_pyhj: 0.001
-    actor_activation: "ReLU" #type=str, default="ReLU")
-    critic_activation: "ReLU"
-    warm_start_path: None # type=str, default=None)
-    kwargs: {} # type=str, default="")
 
+    reward_threshold: Optional[float] = None
+    buffer_size: int = 40000
+    actor_lr: float = 1e-4
+    critic_lr: float = 1e-3
+    gamma_pyhj: float = 0.9999 # type=float, default=0.95)
+    tau: float = 0.005 # type=float, default=0.005)
+    exploration_noise: float = 0.1 # type=float, default=0.1)
+    epoch: int = 1 # type=int, default=10)
+    total_episodes: int = 60 # type=int, default=160)
+    step_per_epoch: int = 40000 # type=int, default=40000)
+    step_per_collect: int = 8 # type=int, default=8)
+    update_per_step: float = 0.125 # type=float, default=0.125)
+    batch_size_pyhj: int = 512 # type=int, default=512)
+    control_net: List[int] = field(default_factory=lambda: [512, 512, 512, 512]) # type=int, nargs="*", default=None) # for control policy
+    critic_net: List[int] = field(default_factory=lambda: [512, 512, 512, 512])  # type=int, nargs="*", default=None) # for critic net
+    training_num: int = 1 # type=int, default=8)
+    test_num: int = 1 # type=int, default=100)
+    render: float = 0. # type=float, default=0.)
+    rew_norm: bool = False # action="store_true", default=False)
+    n_step: int = 1 # type=int, default=1)
+    continue_training_logdir: Optional[str] = None # type=str, default=None)
+    continue_training_epoch: Optional[int] = None # type=int, default=None)
+    actor_gradient_steps: int = 1 # type=int, default=1)
+    is_game_baseline: bool = False # type=bool, default=False) # it will be set automatically
+    target_update_freq: int = 400 # type=int, default=400)
+    auto_alpha: float = 1
+    alpha_lr: float = 3e-4
+    alpha: float = 0.2
+    weight_decay_pyhj: float = 0.001
+    actor_activation: str = "ReLU" #type=str, default="ReLU")
+    critic_activation: str = "ReLU"
+    warm_start_path: str = None # type=str, default=None)
+    kwargs: Dict[str, Any] = field(default_factory=lambda: {}) # type=str, default="")
+
+    filter_directory: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/nogp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_0/epoch_id_12/policy.pth'
 
 from typing import Dict, Any, Union
 
@@ -292,7 +286,26 @@ def combine_dictionaries(
 
     return combined
 
+def count_steps(folder):
+    return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
 
+
+def make_dataset(episodes, args):
+    generator = tools.sample_episodes(episodes, args.batch_length)
+    dataset = tools.from_generator(generator, args.batch_size)
+    return dataset
+    
+
+class Logger:
+    def __init__(self, log_wandb=False, tensorboard: SummaryWriter = None) -> None:
+        self.writer = tensorboard
+        self.log_wandb = log_wandb
+    def add_scalar(self, tag, scalar_value, step):
+        if self.log_wandb:
+            wandb.log({tag: scalar_value}, step=step)
+        self.writer.add_scalar(tag, scalar_value, step)
+    def close(self):
+        self.writer.close()
 
 class Dreamer(nn.Module):
     def __init__(self, obs_space, act_space, args, logger, dataset, expert_dataset=None):
@@ -325,9 +338,10 @@ class Dreamer(nn.Module):
             plan2explore=lambda: expl.Plan2Explore(args, self._wm, reward),
         )[args.expl_behavior]().to(self._args.device)
         self.hybrid = args.hybrid
-    def __call__(self, obs, reset, state=None, training=True):
-        #t0 = time.time()
+        self.gp_metrics = np.array([0,0,0,0])
+        self.nogp_metrics = np.array([0,0,0,0])
 
+    def __call__(self, obs, reset, state=None, training=True):
         step = self._step
         if training:
             steps = (
@@ -356,22 +370,13 @@ class Dreamer(nn.Module):
                     openl = self._wm.video_pred(next(self._dataset))
                     self._logger.video("train_openl", to_np(openl))
                 self._logger.write(fps=True)
-        #t_train_end = time.time()
 
-        #t_policy_start = time.time()
         policy_output, state = self._policy(obs, state, training)
-        #t_policy_end = time.time()
 
         if training:
             self._step += len(reset)
             self._logger.step = self._args.action_repeat * self._step
 
-        #t1 = time.time()
-
-        #print(f"Training time: {t_train_end - t_train_start:.4f} seconds")
-        #print(f"Policy time: {t_policy_end - t_policy_start:.4f} seconds")
-        #print(f"Other overhead: {t1 - t0 - (t_train_end - t_train_start) - (t_policy_end - t_policy_start):.4f} seconds")
-        #print(f"Total Dreamer call time: {t1 - t0:.4f} seconds")
         return policy_output, state
 
     def _policy(self, obs, state, training):
@@ -386,13 +391,32 @@ class Dreamer(nn.Module):
             latent["stoch"] = latent["mean"]
         feat = self._wm.dynamics.get_feat(latent)
 
-        gp = self._wm.heads["margin_gp"](feat)
-        no_gp = self._wm.heads["margin_nogp"](feat)
-        reward = self._wm.heads["reward"](feat).mode()
-        print('reward', reward.shape, reward)
-        print('fail', obs['failure'], obs['failure'].shape)
-        print('gp', gp.shape, gp)
-        print('no_gp', no_gp.shape, no_gp)
+
+
+        gp = self._wm.heads["margin_gp"](feat)[0].item()
+        no_gp = self._wm.heads["margin_nogp"](feat)[0].item()
+
+
+        # metrics are TN, FP, TP, FN
+        if obs['failure'].item() == 1 and gp < 0: # TN
+            self.gp_metrics += np.array([1, 0, 0, 0])
+        if obs['failure'].item() == 1 and no_gp < 0:
+            self.nogp_metrics += np.array([1, 0, 0, 0])
+        if obs['failure'].item() == 1 and gp > 0: # FP
+            self.gp_metrics += np.array([0, 1, 0, 0])
+        if obs['failure'].item() == 1 and no_gp > 0:
+            self.nogp_metrics += np.array([0, 1, 0, 0])
+
+        if obs['failure'].item() == 0 and gp < 0: # FN
+            self.gp_metrics += np.array([0, 0, 0, 1])
+        if obs['failure'].item() == 0 and no_gp < 0:
+            self.nogp_metrics += np.array([0, 0, 0, 1])
+        if obs['failure'].item() == 0 and gp > 0: # TP
+            self.gp_metrics += np.array([0, 0, 1, 0])
+        if obs['failure'].item() == 0 and no_gp > 0:
+            self.nogp_metrics += np.array([0, 0, 1, 0])
+
+        #print('fail', obs['failure'].item(), 'gp', gp, 'no_gp', no_gp)
         if not training:
             actor = self._task_behavior.actor(feat)
             action = actor.mode()
@@ -402,11 +426,9 @@ class Dreamer(nn.Module):
         else:
             actor = self._task_behavior.actor(feat)
             action = actor.sample()
+
         
-        # add noise to the action to avoid overfitting the l(z)
-        action += torch.randn_like(action)*0.2
-
-
+        action = actor.sample()
         logprob = actor.log_prob(action)
         latent = {k: v.detach() for k, v in latent.items()}
         action = action.detach()
@@ -422,21 +444,20 @@ class Dreamer(nn.Module):
         metrics = {}
         if self.hybrid and self._step < self._args.hybrid_steps:
             mixed_data = combine_dictionaries(data, expert_data, take_half=True)
-            _, _, mets = self._wm._train_margins(mixed_data)
+            post, context, mets = self._wm._train(mixed_data)
         else:
-            _, _, mets = self._wm._train_margins(data)
+            post, context, mets = self._wm._train(data)
         metrics.update(mets)
 
 
-        '''start = self._wm._get_post(data) #post
+        start = self._wm._get_post(data) #post
         reward = lambda f, s, a: self._wm.heads["reward"](
             self._wm.dynamics.get_feat(s)
         ).mode()
         metrics.update(self._task_behavior._train(start, reward)[-1])
         if self._args.expl_behavior != "greedy":
             mets = self._expl_behavior.train(start, context, data)[-1]
-            metrics.update({"expl_" + key: value for key, value in mets.items()})'''
-        
+            metrics.update({"expl_" + key: value for key, value in mets.items()})
         for name, value in metrics.items():
             if not name in self._metrics.keys():
                 self._metrics[name] = [value]
@@ -444,26 +465,88 @@ class Dreamer(nn.Module):
                 self._metrics[name].append(value)
 
 
-def count_steps(folder):
-    return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
 
+def V(state, policy):
+    tmp_obs = np.array(state)#.reshape(1,-1)
+    tmp_batch = Batch(obs = tmp_obs, info = Batch())
+    ac = policy(tmp_batch, model="actor_old").act
+    tmp = policy.critic(tmp_batch.obs, ac)
+    return tmp.cpu().detach().numpy().flatten()
 
-def make_dataset(episodes, args):
-    generator = tools.sample_episodes(episodes, args.batch_length)
-    dataset = tools.from_generator(generator, args.batch_size)
-    return dataset
+def Q(state, policy, action):
+    if isinstance(action, dict):
+        action = action['action']
+    tmp_obs = np.array(state)#.reshape(1,-1)
+    tmp_batch = Batch(obs = tmp_obs, info = Batch())
+    tmp = policy.critic(tmp_batch.obs, action)
+    return tmp.cpu().detach().numpy().flatten()
+
+def pi_safe(state, policy):
+    tmp_obs = np.array(state)#.reshape(1,-1)
+    tmp_batch = Batch(obs = tmp_obs, info = Batch())
+    return policy(tmp_batch, model="actor_old").act.cpu().detach().numpy()#.flatten()
+
+def rollout_policy(
+    nom_policy,
+    safe_policy,
+    agent,
+    envs,
+    num_trajs=0,
+):
+    torch.cuda.empty_cache()
     
+    episode = 0
+    
+    obs_vec, info = envs.reset()
+    obs_vec['failure'] = info['is_knocked_over']
+    done_vec = np.zeros(envs.num_envs, bool)
 
-class Logger:
-    def __init__(self, log_wandb=False, tensorboard: SummaryWriter = None) -> None:
-        self.writer = tensorboard
-        self.log_wandb = log_wandb
-    def add_scalar(self, tag, scalar_value, step):
-        if self.log_wandb:
-            wandb.log({tag: scalar_value}, step=step)
-        self.writer.add_scalar(tag, scalar_value, step)
-    def close(self):
-        self.writer.close()
+    agent_state = None
+    # statistics from the offline dataset
+    max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
+    min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
+    # MAIN ENV STEP LOOP
+    while episode < num_trajs:
+        action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
+
+        # agent_state is a tuple of (latent, action)
+        # latent is a dict with keys stoch, deter, and discrete
+
+        #last_latent = {k: v.detach() for k, v in agent_state[0].items()}
+        feat = agent._wm.dynamics.get_feat(agent_state[0]).cpu().detach().numpy()
+
+        
+
+        # action is a dict with keys action and logprob        
+        if isinstance(action, dict):
+            action = {k: np.array(action[k].detach().cpu()) for k in action}
+        else:
+            action = np.array(action)
+
+        ac_safe = pi_safe(feat, safe_policy)
+        ac_safe = (ac_safe + 1) * 0.5 * (max_ac - min_ac) + min_ac
+        print(ac_safe)
+        val = V(feat, safe_policy)[0] # this is just to check the shape of feat
+        print('value', val)
+        qval = Q(feat, safe_policy, action)[0] # this is just to check the shape of feat
+        print('qvalue', qval)
+
+
+        if qval < 0.2:
+            print('action is unsafe, using safe policy')
+            action['action'] = torch.tensor(ac_safe, dtype=torch.float32).to(envs.device)
+            print('safe action', action['action'])
+
+
+        obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
+
+        done_vec = term_vec | trunc_vec
+        done = done_vec.cpu().numpy()
+        obs_vec['failure'] = info_vec['is_knocked_over']
+
+        episode += int(done.sum())
+        
+
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -483,14 +566,6 @@ if __name__ == "__main__":
     args.eval_every //= args.action_repeat
     args.log_every //= args.action_repeat
     args.time_limit //= args.action_repeat
-    args.encoder = {'mlp_keys': 'state', 'cnn_keys': '.*\_cam$', 'act': 'SiLU', 'norm': True, 'cnn_depth': 32, 'kernel_size': 4, 'minres': 4, 'mlp_layers': 5, 'mlp_units': 1024, 'symlog_inputs': True}
-    args.decoder = {'mlp_keys': 'state', 'cnn_keys': '.*\_cam$', 'act': 'SiLU', 'norm': True, 'cnn_depth': 32, 'kernel_size': 4, 'minres': 4, 'mlp_layers': 5, 'mlp_units': 1024, 'cnn_sigmoid': False, 'image_dist': 'mse', 'vector_dist': 'symlog_mse', 'outscale': 1.0}
-    args.actor = {'layers': 2, 'dist': 'normal', 'entropy': 3e-4, 'unimix_ratio': 0.01, 'std': 'learned', 'min_std': 0.1, 'max_std': 1.0, 'temp': 0.1, 'lr': 3e-5, 'eps': 1e-5, 'grad_clip': 100.0, 'outscale': 1.0}
-    args.critic = {'layers': 2, 'dist': 'symlog_disc', 'slow_target': True, 'slow_target_update': 1, 'slow_target_fraction': 0.02, 'lr': 3e-5, 'eps': 1e-5, 'grad_clip': 100.0, 'outscale': 0.0}
-    args.reward_head =  {'layers': 2, 'dist': 'symlog_disc', 'loss_scale': 1.0, 'outscale': 0.0}
-    args.cont_head =  {'layers': 2, 'loss_scale': 1.0, 'outscale': 1.0}
-    args.margin_head =  {'layers': 2, 'loss_scale': 1.0}
-    args.grad_heads = ['decoder', 'reward', 'cont']
 
     # TRY NOT TO MODIFY: seeding
     random.seed(args.seed)
@@ -512,17 +587,16 @@ if __name__ == "__main__":
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, human_render_camera_configs=dict(shader_pack="default"), **env_kwargs)
     
+
+    # Env Wrappers
+    max_episode_steps = gym_utils.find_max_episode_steps_value(envs.env) #60
+
     envs = DreamerWrapper(envs)
     eval_envs = DreamerWrapper(eval_envs)
     envs = SelectAction(envs)
     eval_envs = SelectAction(eval_envs)
     envs = UUID(envs)
     eval_envs = UUID(eval_envs)
-    
-    
-    # rgbd obs mode returns a dict of data, we flatten it so there is just a rgbd key and state key
-    #envs = FlattenRGBDObservationWrapper(envs, rgb=True, depth=False, state=args.include_state)
-    max_episode_steps = gym_utils.find_max_episode_steps_value(envs.env) #60
     print(f"Max episode steps: {max_episode_steps}")
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
@@ -541,32 +615,6 @@ if __name__ == "__main__":
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
     logger = None
-    if not args.evaluate:
-        print("Running training")
-        if args.track:
-            import wandb
-            args = vars(args)
-            args["env_cfg"] = dict(**env_kwargs, num_envs=args.num_envs, env_id=args.env_id, reward_mode="normalized_dense", env_horizon=max_episode_steps, partial_reset=args.partial_reset)
-            args["eval_env_cfg"] = dict(**env_kwargs, num_envs=args.num_eval_envs, env_id=args.env_id, reward_mode="normalized_dense", env_horizon=max_episode_steps, partial_reset=False)
-            wandb.init(
-                project=args.wandb_project_name,
-                entity=args.wandb_entity,
-                sync_tensorboard=False,
-                args=args,
-                name=run_name,
-                save_code=True,
-                group=args.wandb_group,
-                tags=["sac", "walltime_efficient"]
-            )
-        writer = SummaryWriter(f"runs/{run_name}")
-        writer.add_text(
-            "hyperparameters",
-            "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-        )
-        logger = Logger(log_wandb=args.track, tensorboard=writer)
-    else:
-        print("Running evaluation")
-
 
     print("Logdir", logdir)
     logdir.mkdir(parents=True, exist_ok=True)
@@ -588,9 +636,7 @@ if __name__ == "__main__":
         directory = args.evaldir
     eval_eps = tools.load_episodes(directory, limit=1)
     expert_eps = collections.OrderedDict()
-    if args.hybrid:
-        tools.fill_expert_dataset(args, expert_eps)
-
+    
     acts = envs.single_action_space
     acts.low = np.ones_like(acts.low) * -1
     acts.high = np.ones_like(acts.high) # need to normalize actions 
@@ -598,44 +644,7 @@ if __name__ == "__main__":
     
     args.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 
-    state = None
-    if not args.offline_traindir:
-        prefill = max(0, args.prefill - count_steps(args.traindir))
-        print(f"Prefill dataset ({prefill} steps).")
-        if hasattr(acts, "discrete"):
-            random_actor = tools.OneHotDist(
-                torch.zeros(args.num_actions).repeat(args.num_envs, 1)
-            )
-        else:
-            random_actor = torchd.independent.Independent(
-                torchd.uniform.Uniform(
-                    torch.tensor(acts.low).repeat(args.num_envs, 1),
-                    torch.tensor(acts.high).repeat(args.num_envs, 1),
-                ),
-                1,
-            )
-
-        def random_agent(o, d, s):
-            action = random_actor.sample()
-            logprob = random_actor.log_prob(action)
-            return {"action": action, "logprob": logprob}, None
-
-        state = tools.simulate(
-            random_agent,
-            envs,
-            train_eps,
-            args.traindir,
-            logger,
-            limit=args.dataset_size,
-            steps=prefill,
-        )
-        logger.step += prefill * args.action_repeat
-        print(f"Logger: ({logger.step} steps).")
-    print("Simulate agent.")
-    
-    
     train_dataset = make_dataset(train_eps, args)
-    eval_dataset = make_dataset(eval_eps, args)
     expert_dataset = make_dataset(expert_eps, args)
 
     agent = Dreamer(
@@ -647,51 +656,96 @@ if __name__ == "__main__":
         expert_dataset=expert_dataset,
     ).to(args.device)
     agent.requires_grad_(requires_grad=False)
-
     checkpoint = torch.load(args.wm_directory)
-    state_dict = checkpoint["agent_state_dict"]
-    # remove all weights associated with wm.heads.margin
-    state_dict = {k: v for k, v in state_dict.items() if "margin" not in k}
-    agent.load_state_dict(state_dict, strict=False)
-    agent._wm.remake_margin()
-    print('success')
+    agent.load_state_dict(checkpoint["agent_state_dict"])
+    tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
+    agent._should_pretrain._once = False
+
+
+
+
     
-    # make sure eval will be executed once after args.steps
-    while agent._step < args.steps + args.eval_every:
-        logger.write()
-        if args.eval_episode_num > 0:
-            print("Start evaluation.")
-            eval_policy = functools.partial(agent, training=False)
-            tools.simulate(
-                eval_policy,
-                eval_envs,
-                eval_eps,
-                args.evaldir,
-                logger,
-                is_eval=True,
-                episodes=args.eval_episode_num,
-            )
-            if args.video_pred_log:
-                video_pred = agent._wm.video_pred(next(eval_dataset))
-                logger.video("eval_openl", to_np(video_pred))
-        print("Start training.")
-        state = tools.simulate(
-            agent,
-            envs,
-            train_eps,
-            args.traindir,
-            logger,
-            limit=args.dataset_size,
-            steps=args.eval_every,
-            state=state,
+   
+
+    # seed
+    ac_space = spaces.Box(low=-1.0, high=1.0, shape=(7,), dtype=np.float32) # joint action space
+    ob_space = spaces.Box(low=-np.inf, high=np.inf, shape=(1,1,1536,), dtype=np.float32)
+
+    args.state_shape = ob_space.shape or ob_space.n
+    args.action_shape = ac_space.shape or ac_space.n
+
+    args.max_action = ac_space.high[0]
+
+    args.action_shape = ac_space.shape or ac_space.n
+    args.max_action = ac_space.high[0]
+
+    if args.actor_activation == 'ReLU':
+        actor_activation = torch.nn.ReLU
+    else:
+        raise ValueError("Please provide actor_activation!")
+
+    if args.critic_activation == 'ReLU':
+        critic_activation = torch.nn.ReLU
+    else:
+        raise ValueError("Please provide critic_activation!")
+
+    if args.critic_net is not None:
+        critic_net = Net(
+            args.state_shape,
+            args.action_shape,
+            hidden_sizes=args.critic_net,
+            activation=critic_activation,
+            concat=True,
+            device=args.device
         )
-        items_to_save = {
-            "agent_state_dict": agent.state_dict(),
-            "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
-        }
-        torch.save(items_to_save, logdir / "latest.pt")
-    for env in envs + eval_envs:
-        try:
-            env.close()
-        except Exception:
-            pass
+    else:
+        # report error:
+        raise ValueError("Please provide critic_net!")
+
+    critic = Critic(critic_net, device=args.device).to(args.device)
+    critic_optim = torch.optim.Adam(critic.parameters(), lr=args.critic_lr)
+
+    log_path = None
+
+    from PyHJ.policy import avoid_DDPGPolicy_annealing as DDPGPolicy
+
+    print("DDPG under the Avoid annealed Bellman equation with no Disturbance has been loaded!")
+
+    actor_net = Net(args.state_shape, hidden_sizes=args.control_net, activation=actor_activation, device=args.device)
+    actor = Actor(
+        actor_net, args.action_shape, max_action=args.max_action, device=args.device
+    ).to(args.device)
+    actor_optim = torch.optim.Adam(actor.parameters(), lr=args.actor_lr)
+
+
+    safe_policy = DDPGPolicy(
+    critic,
+    critic_optim,
+    tau=args.tau,
+    gamma=args.gamma_pyhj,
+    exploration_noise=GaussianNoise(sigma=args.exploration_noise),
+    reward_normalization=args.rew_norm,
+    estimation_step=args.n_step,
+    action_space=ac_space,
+    actor=actor,
+    actor_optim=actor_optim,
+    actor_gradient_steps=args.actor_gradient_steps,
+    ).to(args.device)
+    filter_checkpoint = torch.load(args.filter_directory)
+    safe_policy.load_state_dict(filter_checkpoint)
+
+
+
+
+
+
+
+    policy = functools.partial(agent, training=False)
+
+    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=2)
+    envs.reset()
+    print("GP metrics", agent.gp_metrics)
+    print("No GP metrics", agent.nogp_metrics)
+
+
+
