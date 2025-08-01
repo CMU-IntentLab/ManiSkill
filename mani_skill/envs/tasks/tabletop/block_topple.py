@@ -281,7 +281,7 @@ class BlockToppleEnv(BaseEnv):
         reward -= ac_rew
         
         upright_penalty = self.object_upright_penalty(scale=0.1)
-        reward += upright_penalty
+        # reward += upright_penalty
 
         
         success_mask = info["success"]
