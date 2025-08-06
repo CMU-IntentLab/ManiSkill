@@ -450,22 +450,37 @@ class WorldModel(nn.Module):
                     )[0]
                     gradients = gradients.view(pos_data.shape[0], -1)
                     gradients_norm = torch.sqrt(torch.sum(gradients**2, dim=1) + 1e-12)
-
-                    gp_loss = ((gradients_norm - 0.1) ** 2).mean()
-
-                pos_mean = pos.mean()
-                neg_mean = neg.mean()
-
-                zero_sum_loss = neg_mean - pos_mean
-                relu_loss = torch.relu(self._config.gamma_lx + neg_mean) + torch.relu(self._config.gamma_lx - pos_mean)
-
-                loss = 0.01*zero_sum_loss + relu_loss + 10 * gp_loss
+                    gradient_thresh = 0.1
+                    
+                    excess = (gradients_norm - gradient_thresh).clamp(min=0)  # only keep values > threshold
+                    gp_loss = (excess ** 2).mean()
+                    #gp_loss = ((gradients_norm - gradient_thresh) ** 2).mean()
+                else:
+                    gp_loss = torch.tensor(0., device=pos.device)
+                
+                gamma = self._config.gamma_lx
+                relu_loss = torch.tensor(0., device=pos.device)
+                zero_sum_loss = torch.tensor(0., device=pos.device)
+                if pos.numel() > 0:
+                    pos_mean = pos.mean()
+                    zero_sum_loss -= pos_mean
+                    relu_loss += torch.relu(gamma - pos).mean()
+                if neg.numel() >0:
+                    neg_mean = neg.mean()
+                    zero_sum_loss += neg_mean
+                    relu_loss += torch.relu(gamma + neg).mean()
+                # print only first two decimal places
+                print(neg.numel(), pos.numel())
+                relu_weight = 100
+                gp_weight = 10
+                print('losses', round(relu_weight*relu_loss.item(), 2), round(gp_weight*gp_loss.item(), 2), round(zero_sum_loss.item(), 2))
+                loss = zero_sum_loss + relu_weight * relu_loss + gp_weight * gp_loss
 
                 self._model_opt(torch.mean(loss), self.parameters())
                 metrics = self.margin_gp_opt(loss, self.heads["margin_gp"].parameters())
 
-                metrics["margin_gp"] = gp_loss.item()
                 metrics["sign_loss"] = to_np(relu_loss)
+                metrics["zero_sum_loss"] = to_np(zero_sum_loss)
                 metrics["gp_loss"] = to_np(gp_loss)
 
         with tools.RequiresGrad(self.heads["margin_nogp"]):
@@ -525,7 +540,6 @@ class WorldModel(nn.Module):
         # observed image is given until 5 steps
         model = torch.cat([recon[:, :5], openl], 1)
         truth = data["wrist_cam"][:6]
-        model = model
         error = (model - truth + 1.0) / 2.0
 
         return torch.cat([truth, model, error], 2)

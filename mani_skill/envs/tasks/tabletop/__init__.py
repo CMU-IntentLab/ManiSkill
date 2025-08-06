@@ -21,17 +21,12 @@ from .block_topple import BlockToppleEnv
 from .block_topple_wm import BlockToppleWMEnv
 
 from gymnasium.envs.registration import (
-    load_plugin_envs,
-    make,
-    pprint_registry,
     register,
-    registry,
-    spec,
 )
 
 register(
     id="BlockToppleWM-v0",
     entry_point="mani_skill.envs.tasks.tabletop.block_topple_wm:BlockToppleWMEnv",
-    max_episode_steps=8,
+    max_episode_steps=12,
     reward_threshold=1e8,
 )

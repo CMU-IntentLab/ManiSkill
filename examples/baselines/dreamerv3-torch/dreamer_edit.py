@@ -3,7 +3,7 @@ from collections import defaultdict
 import os
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Any
 
 import gymnasium as gym
@@ -34,7 +34,7 @@ to_np = lambda x: x.detach().cpu().numpy()
 
 @dataclass
 class Args:
-    exp_name: Optional[str] = None
+    exp_name: Optional[str] = "wm_edit"
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
@@ -122,7 +122,7 @@ class Args:
     video_pred_log: bool =  True
     precision: int = 32
     action_repeat: int = 1
-    steps = int = 10_000_000
+    steps: int = 50_000
 
     eval_every: int = 10_000
     log_every: int = 10_000
@@ -189,7 +189,7 @@ class Args:
     eval_state_mean: bool = False
 
     gamma_lx: float = 0.75
-    offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    offline_data_path: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     pretrain: int = 500
     pretrain: int = 500
     hybrid_steps: int = 0
@@ -205,49 +205,47 @@ class Args:
     grad_heads: List[str] = field(default_factory=lambda: ['decoder', 'reward', 'cont'])
 
     gamma_lx: float = 0.75
-    offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    offline_data_path: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     pretrain: int = 500
     hybrid_steps: int = 1_000_000
     hybrid: bool = True
 
-    wm_directory: str = "/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer_edit__1__1753385494/wm_lz.pt"
+    wm_directory: str = "/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/wm_base/wm_lz.pt"
     filter_directory: str = ''
 
-    # LCRL
-    reward_threshold: null
-    seed: 0
-    buffer_size: 40000
-    actor_lr: 1e-4
-    critic_lr: 1e-3
-    gamma_pyhj: 0.9999 # type=float, default=0.95)
-    tau: 0.005 # type=float, default=0.005)
-    exploration_noise: 0.1 # type=float, default=0.1)
-    epoch: 1 # type=int, default=10)
-    total_episodes: 60 # type=int, default=160)
-    step_per_epoch: 40000 # type=int, default=40000)
-    step_per_collect: 8 # type=int, default=8)
-    update_per_step: 0.125 # type=float, default=0.125)
-    batch_size_pyhj: 512 # type=int, default=512)
-    control_net: [512, 512, 512, 512] # type=int, nargs="*", default=None) # for control policy
-    critic_net: [512, 512, 512, 512]  # type=int, nargs="*", default=None) # for critic net
-    training_num: 1 # type=int, default=8)
-    test_num: 1 # type=int, default=100)
-    render: 0. # type=float, default=0.)
-    rew_norm: False # action="store_true", default=False)
-    n_step: 1 # type=int, default=1)
-    continue_training_logdir: None # type=str, default=None)
-    continue_training_epoch: None # type=int, default=None)
-    actor_gradient_steps: 1 # type=int, default=1)
-    is_game_baseline: False # type=bool, default=False) # it will be set automatically
-    target_update_freq: 400 # type=int, default=400)
-    auto_alpha: 1
-    alpha_lr: 3e-4
-    alpha: 0.2
-    weight_decay_pyhj: 0.001
-    actor_activation: "ReLU" #type=str, default="ReLU")
-    critic_activation: "ReLU"
-    warm_start_path: None # type=str, default=None)
-    kwargs: {} # type=str, default="")
+    reward_threshold: Optional[float] = None
+    buffer_size: int = 40000
+    actor_lr: float = 1e-4
+    critic_lr: float = 1e-3
+    gamma_pyhj: float = 0.9999 # type=float, default=0.95)
+    tau: float = 0.005 # type=float, default=0.005)
+    exploration_noise: float = 0.1 # type=float, default=0.1)
+    epoch: int = 1 # type=int, default=10)
+    total_episodes: int = 60 # type=int, default=160)
+    step_per_epoch: int = 40000 # type=int, default=40000)
+    step_per_collect: int = 8 # type=int, default=8)
+    update_per_step: float = 0.125 # type=float, default=0.125)
+    batch_size_pyhj: int = 512 # type=int, default=512)
+    control_net: List[int] = field(default_factory=lambda: [512, 512, 512, 512]) # type=int, nargs="*", default=None) # for control policy
+    critic_net: List[int] = field(default_factory=lambda: [512, 512, 512, 512])  # type=int, nargs="*", default=None) # for critic net
+    training_num: int = 1 # type=int, default=8)
+    test_num: int = 1 # type=int, default=100)
+    render: float = 0. # type=float, default=0.)
+    rew_norm: bool = False # action="store_true", default=False)
+    n_step: int = 1 # type=int, default=1)
+    continue_training_logdir: Optional[str] = None # type=str, default=None)
+    continue_training_epoch: Optional[int] = None # type=int, default=None)
+    actor_gradient_steps: int = 1 # type=int, default=1)
+    is_game_baseline: bool = False # type=bool, default=False) # it will be set automatically
+    target_update_freq: int = 400 # type=int, default=400)
+    auto_alpha: float = 1
+    alpha_lr: float = 3e-4
+    alpha: float = 0.2
+    weight_decay_pyhj: float = 0.001
+    actor_activation: str = "ReLU" #type=str, default="ReLU")
+    critic_activation: str = "ReLU"
+    warm_start_path: str = None # type=str, default=None)
+    kwargs: Dict[str, Any] = field(default_factory=lambda: {}) # type=str, default="")
 
 
 from typing import Dict, Any, Union
@@ -389,10 +387,10 @@ class Dreamer(nn.Module):
         gp = self._wm.heads["margin_gp"](feat)
         no_gp = self._wm.heads["margin_nogp"](feat)
         reward = self._wm.heads["reward"](feat).mode()
-        print('reward', reward.shape, reward)
-        print('fail', obs['failure'], obs['failure'].shape)
-        print('gp', gp.shape, gp)
-        print('no_gp', no_gp.shape, no_gp)
+        #print('reward', reward.shape, reward)
+        print('fail', obs['failure'])
+        print('gp', 1.*(gp.squeeze()<0))
+        print('no_gp', 1.*(no_gp.squeeze()<0))
         if not training:
             actor = self._task_behavior.actor(feat)
             action = actor.mode()
@@ -403,8 +401,9 @@ class Dreamer(nn.Module):
             actor = self._task_behavior.actor(feat)
             action = actor.sample()
         
+        action = actor.sample()
         # add noise to the action to avoid overfitting the l(z)
-        action += torch.randn_like(action)*0.2
+        #action += torch.randn_like(action)*0.05
 
 
         logprob = actor.log_prob(action)

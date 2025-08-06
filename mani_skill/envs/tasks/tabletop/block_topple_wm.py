@@ -21,7 +21,7 @@ class BlockToppleWMEnv(gym.Env):
         self.set_wm(*params)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(1,1536,), dtype=np.float32)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(7,), dtype=np.float32) # joint action space
-        self.N = 1
+        self.N = 5
 
         self.max_ac = torch.tensor([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494]).to(self.device)
         self.min_ac = torch.tensor([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357]).to(self.device)
@@ -34,6 +34,8 @@ class BlockToppleWMEnv(gym.Env):
             self.feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
         else:
             self.feat_size = config.dyn_stoch + config.dyn_deter
+
+        self.use_gp = config.use_gp
     
 
     def step(self, action):
@@ -84,9 +86,12 @@ class BlockToppleWMEnv(gym.Env):
         
         feat = self.wm.dynamics.get_feat(state).detach()
         with torch.no_grad():  # Disable gradient calculation
-            outputs = torch.tanh(self.wm.heads["margin_gp"](feat))
+            if self.use_gp:
+                outputs = torch.tanh(self.wm.heads["margin_gp"](feat))
+            else:
+                outputs = torch.tanh(self.wm.heads["margin_nogp"](feat))
             g_xList.append(outputs.detach().cpu().numpy())
-        
+
         safety_margin = np.array(g_xList).squeeze()
 
         return safety_margin
