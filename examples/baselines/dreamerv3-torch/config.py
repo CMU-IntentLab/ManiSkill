@@ -207,7 +207,9 @@ class Args:
 
     use_gp: bool = False
     wm_directory: str = "/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/wm_edit/wm_lz.pt"
-    filter_directory_nogp: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/no_gp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_0/epoch_id_15/policy.pth'
-    filter_directory_gp: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/gp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_0/epoch_id_15/policy.pth'
-    filter_thresh: float = 0.75
-    num_runs: int = 5
+    filter_directory_nogp: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/no_gp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_1/epoch_id_20/policy.pth'
+    filter_directory_gp: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/gp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_1/epoch_id_20/policy.pth'
+    filter_thresh: float = 0.2
+    num_runs: int = 1
+    cbf_gamma: float = 0.7
+    filter_mode: str = 'cbf' # 'cbf' or 'least_restrictive' or 'lr

@@ -271,24 +271,42 @@ def V(state, policy):
     tmp = policy.critic(tmp_batch.obs, ac)
     return tmp.cpu().detach().numpy().flatten()
 
-def Q(state, policy, action):
+def Q_v1(state, action, policy):
     if isinstance(action, dict):
         action = action['action']
+    b, _ = action.shape
+    if state.shape[0] != b:
+        state = np.repeat(state, repeats=b, axis=0)
     tmp_obs = np.array(state)#.reshape(1,-1)
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
     tmp = policy.critic(tmp_batch.obs, action)
     return tmp.cpu().detach().numpy().flatten()
 
-def Q_v2(latent, action, agent, safe_policy):
+def Q_v2(latent, action, policy, agent):
     if isinstance(action, dict):
         action = action['action']
     action = torch.tensor(action, dtype=torch.float32).to(latent['stoch'].device)
+
+    # batch computation
+    b, _ = action.shape
+    if latent['stoch'].shape[0] != b:
+        latent = {
+            k: v.repeat(b, *([1] * (v.ndim - 1)))
+            for k, v in latent.items()
+        }
+
+    # model-based rollout
     img_latent = agent._wm.dynamics.img_step(latent, action)
     if agent._args.eval_state_mean:
         img_latent["stoch"] = img_latent["mean"]
-
     img_feat = agent._wm.dynamics.get_feat(img_latent).cpu().detach().numpy()
-    return V(img_feat, safe_policy)
+    return V(img_feat, policy)
+
+def Qfn(agent_state, actions, agent, safe_policy):
+    feat = agent._wm.dynamics.get_feat(agent_state).cpu().detach().numpy()
+    q1 = Q_v1(feat, actions, safe_policy)
+    q2 = Q_v2(agent_state, actions, safe_policy, agent)
+    return np.minimum(q1, q2)
 
 def pi_safe(state, policy):
     tmp_obs = np.array(state)#.reshape(1,-1)
@@ -303,7 +321,9 @@ def rollout_policy(
     agent,
     envs,
     num_trajs=0,
-    thresh=0.6
+    thresh=0.6,
+    cbf_gamma = 0.7,
+    filter_mode='least_restrictive' # 'cbf' or 'least_restrictive'
 ):
     torch.cuda.empty_cache()
     
@@ -319,8 +339,11 @@ def rollout_policy(
     max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
     min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
     # MAIN ENV STEP LOOP
+    Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
+    ac_prev = None
     while episode < num_trajs:
         action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
+        state = agent_state[0].copy()
 
         feat = agent._wm.dynamics.get_feat(agent_state[0]).cpu().detach().numpy()
 
@@ -333,25 +356,50 @@ def rollout_policy(
         else:
             action = np.array(action)
 
-        ac_safe = pi_safe(feat, safe_policy)
-        ac_safe = (ac_safe + 1) * 0.5 * (max_ac - min_ac) + min_ac
-        val = V(feat, safe_policy)[0] # this is just to check the shape of feat
-        print('value', val)
-
+        ac_safe_norm = pi_safe(feat, safe_policy)
+        ac_unnorm = action['action']
         ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
-        qval = Q(feat, safe_policy, ac_norm)[0] # this is just to check the shape of feat
-        print('qvalue', qval)
-        qval2 = Q_v2(agent_state[0], ac_norm, agent, safe_policy)[0] 
-        print('qvalue2', qval2)
+        ac_safe = (ac_safe_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
 
+        # Create interpolation coefficients: shape (N_interp, 1)
+        N_interp = 10
+        t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
+        ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
+        #print('ac_norms', ac_norms.shape, ac_norm.shape)
+        ac_norms[:-1, -1] = ac_norm[0, -1]
+
+        val = V(feat, safe_policy)[0] # this is just to check the shape of feat
+        qvals = Q(state, ac_norms)
+        qval = qvals[0]
+        print('V:',val)
+        #print('Q:',qvals)
         
-        if min(qval, qval2) < thresh:
-            print('action is unsafe, using safe policy')
-            print('action', action['action'])
-            print('safe action', ac_safe)
-            action['action'] = torch.tensor(ac_safe, dtype=torch.float32).to(envs.device)
+        
+        if filter_mode == 'cbf':
+            thresh = cbf_gamma * val
+            valid_actions = (qvals >= thresh).astype(bool)
 
+            if np.any(valid_actions):
+                ac_idx = valid_actions.argmax()  # First index where condition is True
+            else:
+                ac_idx = -1  # Or None, or raise an exception
+            #if ac_idx != 0:
+            #    #print('CBF filtering!')
+            #elif ac_idx == -1:
+            #    #print("LR filtering")
+            ac_norm = ac_norms[ac_idx].cpu().unsqueeze(0).numpy()
+            action['action'] = (ac_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
+        elif filter_mode == 'least_restrictive' or filter_mode == 'lr':
+            if qval < thresh:
+                action['action'] = ac_safe
+        else: 
+            pass # do nothing, use the original action
 
+        if ac_prev is not None:
+            print('ac l2norm', np.linalg.norm(ac_prev - action['action'].squeeze()))
+        ac_prev = action['action'].squeeze()
+
+        #print('ac l2norm', np.linalg.norm(ac_unnorm - action['action'].squeeze()))
         obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
 
         done_vec = term_vec | trunc_vec
@@ -569,7 +617,7 @@ def main(args):
     policy = functools.partial(agent, training=False)
 
     
-    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=args.num_runs, thresh=args.filter_thresh)
+    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=args.num_runs, thresh=args.filter_thresh, cbf_gamma=args.cbf_gamma, filter_mode=args.filter_mode)
     #envs.reset()
     #print('replay')
     #replay_policy(policy, safe_policy, agent, eval_envs, '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/FilterRollout/videos/trajectory.h5')
