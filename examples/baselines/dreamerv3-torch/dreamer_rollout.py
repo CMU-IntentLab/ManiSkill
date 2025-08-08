@@ -34,7 +34,7 @@ to_np = lambda x: x.detach().cpu().numpy()
 
 @dataclass
 class Args:
-    exp_name: Optional[str] = None
+    exp_name: Optional[str] = 'test_lz'
     """the name of this experiment"""
     seed: int = 1
     """seed of the experiment"""
@@ -74,7 +74,7 @@ class Args:
     """the type of environment vectorization to use"""
     num_envs: int = 1
     """the number of parallel environments"""
-    num_eval_envs: int = 10
+    num_eval_envs: int = 1
     """the number of parallel evaluation environments"""
     partial_reset: bool = False
     """whether to let parallel environments reset upon termination instead of truncation"""
@@ -122,7 +122,7 @@ class Args:
     video_pred_log: bool =  True
     precision: int = 32
     action_repeat: int = 1
-    steps = int = 10_000_000
+    steps: int = 10_000_000
 
     eval_every: int = 10_000
     log_every: int = 10_000
@@ -189,10 +189,12 @@ class Args:
     eval_state_mean: bool = False
 
     gamma_lx: float = 0.75
-    offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    offline_data_path: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer_edit__1__1754343268/latest.pt'
     pretrain: int = 500
     hybrid_steps: int = 1_000_000
     hybrid: bool = True
+
+    wm_path: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/wm_edit/latest.pt'
 from typing import Dict, Any, Union
 
 def combine_dictionaries(
@@ -336,7 +338,7 @@ class Dreamer(nn.Module):
         gp = self._wm.heads["margin_gp"](feat)[0].item()
         no_gp = self._wm.heads["margin_nogp"](feat)[0].item()
 
-
+        print('gp:', gp, 'no_gp:', no_gp)
         # metrics are TN, FP, TP, FN
         if obs['failure'].item() == 1 and gp < 0: # TN
             self.gp_metrics += np.array([1, 0, 0, 0])
@@ -572,7 +574,8 @@ if __name__ == "__main__":
         expert_dataset=expert_dataset,
     ).to(args.device)
     agent.requires_grad_(requires_grad=False)
-    checkpoint = torch.load("/home/kensuke/ManiSkill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer_edit__1__1753385494/wm_lz.pt")
+    #checkpoint = torch.load("/home/kensuke/ManiSkill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer_edit__1__1753385494/wm_lz.pt")
+    checkpoint = torch.load(args.wm_path)
     agent.load_state_dict(checkpoint["agent_state_dict"])
     tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
     agent._should_pretrain._once = False
@@ -585,7 +588,7 @@ if __name__ == "__main__":
     eval_policy = functools.partial(agent, training=False)
     tools.simulate(
         eval_policy,
-        envs,
+        eval_envs,
         test_eps,
         args.evaldir,
         logger,
@@ -593,8 +596,8 @@ if __name__ == "__main__":
         episodes=100,
     ) 
 
-    print("GP metrics", agent.gp_metrics)
-    print("No GP metrics", agent.nogp_metrics)
+    print("GP metrics", np.round(100*np.array(agent.gp_metrics)/np.sum(agent.gp_metrics), 2))
+    print("No GP metrics", np.round(100*np.array(agent.nogp_metrics)/np.sum(agent.nogp_metrics), 2))
     video_pred = agent._wm.video_pred(next(test_dataset))
     logger.video("eval_openl", to_np(video_pred))
     for env in envs + eval_envs:

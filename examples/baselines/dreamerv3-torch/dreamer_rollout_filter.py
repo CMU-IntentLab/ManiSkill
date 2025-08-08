@@ -35,217 +35,13 @@ from PyHJ.utils.net.common import Net
 from PyHJ.utils.net.continuous import Actor, Critic
 from PyHJ.exploration import GaussianNoise
 from PyHJ.data import Batch
+
+import h5py
 to_np = lambda x: x.detach().cpu().numpy()
 
-@dataclass
-class Args:
-    exp_name: Optional[str] = "FilterRollout"
-    """the name of this experiment"""
-    seed: int = 1
-    """seed of the experiment"""
-    torch_deterministic: bool = True
-    """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
-    """if toggled, cuda will be enabled by default"""
-    track: bool = False
-    """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "ManiSkill"
-    """the wandb's project name"""
-    wandb_entity: Optional[str] = None
-    """the entity (team) of wandb's project"""
-    wandb_group: str = "dreamer"
-    """the group of the run for wandb"""
-    capture_video: bool = True
-    """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_trajectory: bool = False
-    """whether to save trajectory data into the `videos` folder"""
-    save_model: bool = True
-    """whether to save model into the `runs/{run_name}` folder"""
-    evaluate: bool = False
-    """if toggled, only runs evaluation with the given model checkpoint and saves the evaluation trajectories"""
-    checkpoint: Optional[str] = None
-    """path to a pretrained checkpoint file to start evaluation/training from"""
-    log_freq: int = 1_000_000
-    """logging frequency in terms of environment steps"""
-
-    # Environment specific arguments
-    env_id: str = "BlockTopple-v0"
-    """the id of the environment"""
-    obs_mode: str = "rgb"
-    """the observation mode to use"""
-    include_state: bool = True
-    """whether to include the state in the observation"""
-    env_vectorization: str = "gpu"
-    """the type of environment vectorization to use"""
-    num_envs: int = 1
-    """the number of parallel environments"""
-    num_eval_envs: int = 1
-    """the number of parallel evaluation environments"""
-    partial_reset: bool = False
-    """whether to let parallel environments reset upon termination instead of truncation"""
-    eval_partial_reset: bool = False
-    """whether to let parallel evaluation environments reset upon termination instead of truncation"""
-    num_steps: int = 50
-    """the number of steps to run in each environment per policy rollout"""
-    num_eval_steps: int = 50
-    """the number of steps to run in each evaluation environment during evaluation"""
-    reconfiguration_freq: Optional[int] = None
-    """how often to reconfigure the environment during training"""
-    eval_reconfiguration_freq: Optional[int] = 1
-    """for benchmarking purposes we want to reconfigure the eval environment each reset to ensure objects are randomized in some tasks"""
-    eval_freq: int = 1_000_000
-    """evaluation frequency in terms of iterations"""
-    save_train_video_freq: Optional[int] = None
-    """frequency to save training videos in terms of iterations"""
-    control_mode: Optional[str] = "pd_ee_delta_pose"
-    """the control mode to use for the environment"""
-    render_mode: str = "all"
-    """the environment rendering mode"""
-
-    
-    camera_width: Optional[int] = None
-    """the width of the camera image. If none it will use the default the environment specifies"""
-    camera_height: Optional[int] = None
-    """the height of the camera image. If none it will use the default the environment specifies."""
-
-    # to be filled in runtime
-    """the number of gradient updates per iteration"""
-    steps_per_env: int = 0
-    """the number of steps each parallel env takes per iteration"""
-
-
-    parallel: bool = True
-    eval_every: int = 10_000
-    eval_episode_num: int = 10
-    log_every: int = 10_000
-    reset_every: int =  0
-    device: str = 'cuda:0'
-    compile: bool = True
-    precision: int =  32
-    debug: bool =  False
-    video_pred_log: bool =  True
-    action_repeat: int = 1
-    steps: int = 10_000_000
-
-    #time_limit: int = 1e3
-    offline_traindir: str = ''
-    offline_evaldir: str = ''
-
-    dyn_hidden: int = 512
-    dyn_deter: int = 512
-    dyn_stoch: int = 32
-    dyn_discrete: int = 32
-    dyn_rec_depth: int = 1
-    dyn_mean_act: str = 'none'
-    dyn_std_act: str = 'sigmoid2'
-    dyn_min_std: float = 0.1
-    units: int = 512
-    act: str ='SiLU'
-    norm: bool = True
-    dyn_scale: float = 0.5
-    rep_scale: float = 0.1
-    kl_free: float = 1.0
-    weight_decay: float = 0.0
-    unimix_ratio: float = 0.01
-    initial: str = 'learned'
-
-
-
-    # Exploration
-    expl_behavior: str = 'greedy'
-    expl_until: int = 1000
-    expl_extr_scale: float = 0.0
-    expl_intr_scale: float = 1.0
-    disag_target: str = 'stoch'
-    disag_log: bool =True
-    disag_models: int = 10
-    disag_offset: int = 1
-    disag_layers: int = 4
-    disag_units: int = 400
-    disag_action_cond: bool = False
-
-
-    batch_size: int = 32
-    batch_length: int = 16
-    train_ratio: int = 64
-    model_lr: float = 1e-4
-    opt_eps: float = 1e-8
-    grad_clip: int = 1000
-    dataset_size: int = 1_000_000
-    opt: str = 'adam'
-
-
-    time_limit: int = 100
-    grayscale: bool = False
-    prefill: int = 2500
-    reward_EMA: bool = True
-
-    # Behavior.
-    discount: float = 0.997
-    discount_lambda: float = 0.95
-    imag_horizon: int = 15
-    imag_gradient: str = 'dynamics'
-    imag_gradient_mix: float =  0.0
-    eval_state_mean: bool = False
-
-
-    encoder: Dict[str, Any] = field(default_factory=lambda:{'mlp_keys': 'state', 'cnn_keys': '.*\_cam$', 'act': 'SiLU', 'norm': True, 'cnn_depth': 32, 'kernel_size': 4, 'minres': 4, 'mlp_layers': 5, 'mlp_units': 1024, 'symlog_inputs': True})
-    decoder: Dict[str, Any] = field(default_factory=lambda:{'mlp_keys': 'state', 'cnn_keys': '.*\_cam$', 'act': 'SiLU', 'norm': True, 'cnn_depth': 32, 'kernel_size': 4, 'minres': 4, 'mlp_layers': 5, 'mlp_units': 1024, 'cnn_sigmoid': False, 'image_dist': 'mse', 'vector_dist': 'symlog_mse', 'outscale': 1.0})
-    actor: Dict[str, Any] = field(default_factory=lambda:{'layers': 2, 'dist': 'normal', 'entropy': 3e-4, 'unimix_ratio': 0.01, 'std': 'learned', 'min_std': 0.1, 'max_std': 1.0, 'temp': 0.1, 'lr': 3e-5, 'eps': 1e-5, 'grad_clip': 100.0, 'outscale': 1.0})
-    critic: Dict[str, Any] = field(default_factory=lambda:{'layers': 2, 'dist': 'symlog_disc', 'slow_target': True, 'slow_target_update': 1, 'slow_target_fraction': 0.02, 'lr': 3e-5, 'eps': 1e-5, 'grad_clip': 100.0, 'outscale': 0.0})
-    reward_head:  Dict[str, Any] = field(default_factory=lambda:{'layers': 2, 'dist': 'symlog_disc', 'loss_scale': 1.0, 'outscale': 0.0})
-    cont_head:  Dict[str, Any] = field(default_factory=lambda:{'layers': 2, 'loss_scale': 1.0, 'outscale': 1.0})
-    margin_head:  Dict[str, Any] = field(default_factory=lambda:{'layers': 2, 'loss_scale': 1.0})
-    grad_heads: List[str] = field(default_factory=lambda: ['decoder', 'reward', 'cont'])
-
-    gamma_lx: float = 0.75
-    offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
-    pretrain: int = 500
-    hybrid_steps: int = 1_000_000
-    hybrid: bool = True
-
-    wm_directory: str = "/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer_edit__1__1753385494/wm_lz.pt"
-    filter_directory: str = ''
-
-
-    reward_threshold: Optional[float] = None
-    buffer_size: int = 40000
-    actor_lr: float = 1e-4
-    critic_lr: float = 1e-3
-    gamma_pyhj: float = 0.9999 # type=float, default=0.95)
-    tau: float = 0.005 # type=float, default=0.005)
-    exploration_noise: float = 0.1 # type=float, default=0.1)
-    epoch: int = 1 # type=int, default=10)
-    total_episodes: int = 60 # type=int, default=160)
-    step_per_epoch: int = 40000 # type=int, default=40000)
-    step_per_collect: int = 8 # type=int, default=8)
-    update_per_step: float = 0.125 # type=float, default=0.125)
-    batch_size_pyhj: int = 512 # type=int, default=512)
-    control_net: List[int] = field(default_factory=lambda: [512, 512, 512, 512]) # type=int, nargs="*", default=None) # for control policy
-    critic_net: List[int] = field(default_factory=lambda: [512, 512, 512, 512])  # type=int, nargs="*", default=None) # for critic net
-    training_num: int = 1 # type=int, default=8)
-    test_num: int = 1 # type=int, default=100)
-    render: float = 0. # type=float, default=0.)
-    rew_norm: bool = False # action="store_true", default=False)
-    n_step: int = 1 # type=int, default=1)
-    continue_training_logdir: Optional[str] = None # type=str, default=None)
-    continue_training_epoch: Optional[int] = None # type=int, default=None)
-    actor_gradient_steps: int = 1 # type=int, default=1)
-    is_game_baseline: bool = False # type=bool, default=False) # it will be set automatically
-    target_update_freq: int = 400 # type=int, default=400)
-    auto_alpha: float = 1
-    alpha_lr: float = 3e-4
-    alpha: float = 0.2
-    weight_decay_pyhj: float = 0.001
-    actor_activation: str = "ReLU" #type=str, default="ReLU")
-    critic_activation: str = "ReLU"
-    warm_start_path: str = None # type=str, default=None)
-    kwargs: Dict[str, Any] = field(default_factory=lambda: {}) # type=str, default="")
-
-    #filter_directory: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/nogp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_0/epoch_id_12/policy.pth'
-    filter_directory: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/gp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_0/epoch_id_3/policy.pth'
 
 from typing import Dict, Any, Union
+from config import Args
 
 def combine_dictionaries(
     one_dict: Dict[str, Any], other_dict: Dict[str, Any], take_half: bool = False
@@ -399,7 +195,7 @@ class Dreamer(nn.Module):
         gp = self._wm.heads["margin_gp"](feat)[0].item()
         no_gp = self._wm.heads["margin_nogp"](feat)[0].item()
 
-
+        '''
         # metrics are TN, FP, TP, FN
         if obs['failure'].item() == 1 and gp < 0: # TN
             self.gp_metrics += np.array([1, 0, 0, 0])
@@ -417,7 +213,7 @@ class Dreamer(nn.Module):
         if obs['failure'].item() == 0 and gp > 0: # TP
             self.gp_metrics += np.array([0, 0, 1, 0])
         if obs['failure'].item() == 0 and no_gp > 0:
-            self.nogp_metrics += np.array([0, 0, 1, 0])
+            self.nogp_metrics += np.array([0, 0, 1, 0])'''
 
         #print('fail', obs['failure'].item(), 'gp', gp, 'no_gp', no_gp)
         if not training:
@@ -430,7 +226,6 @@ class Dreamer(nn.Module):
             actor = self._task_behavior.actor(feat)
             action = actor.sample()
 
-        
         action = actor.sample()
         logprob = actor.log_prob(action)
         latent = {k: v.detach() for k, v in latent.items()}
@@ -476,29 +271,49 @@ def V(state, policy):
     tmp = policy.critic(tmp_batch.obs, ac)
     return tmp.cpu().detach().numpy().flatten()
 
-def Q(state, policy, action):
+def Q_v1(state, action, policy):
     if isinstance(action, dict):
         action = action['action']
+    b, _ = action.shape
+    if state.shape[0] != b:
+        state = np.repeat(state, repeats=b, axis=0)
     tmp_obs = np.array(state)#.reshape(1,-1)
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
     tmp = policy.critic(tmp_batch.obs, action)
     return tmp.cpu().detach().numpy().flatten()
 
-def Q_v2(latent, action, agent):
+def Q_v2(latent, action, policy, agent):
     if isinstance(action, dict):
         action = action['action']
     action = torch.tensor(action, dtype=torch.float32).to(latent['stoch'].device)
+
+    # batch computation
+    b, _ = action.shape
+    if latent['stoch'].shape[0] != b:
+        latent = {
+            k: v.repeat(b, *([1] * (v.ndim - 1)))
+            for k, v in latent.items()
+        }
+
+    # model-based rollout
     img_latent = agent._wm.dynamics.img_step(latent, action)
     if agent._args.eval_state_mean:
         img_latent["stoch"] = img_latent["mean"]
-
     img_feat = agent._wm.dynamics.get_feat(img_latent).cpu().detach().numpy()
-    return V(img_feat, safe_policy)
+    return V(img_feat, policy)
+
+def Qfn(agent_state, actions, agent, safe_policy):
+    feat = agent._wm.dynamics.get_feat(agent_state).cpu().detach().numpy()
+    q1 = Q_v1(feat, actions, safe_policy)
+    q2 = Q_v2(agent_state, actions, safe_policy, agent)
+    return np.minimum(q1, q2)
 
 def pi_safe(state, policy):
     tmp_obs = np.array(state)#.reshape(1,-1)
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
     return policy(tmp_batch, model="actor_old").act.cpu().detach().numpy()#.flatten()
+
+
 
 def rollout_policy(
     nom_policy,
@@ -506,6 +321,9 @@ def rollout_policy(
     agent,
     envs,
     num_trajs=0,
+    thresh=0.6,
+    cbf_gamma = 0.7,
+    filter_mode='least_restrictive' # 'cbf' or 'least_restrictive'
 ):
     torch.cuda.empty_cache()
     
@@ -521,8 +339,11 @@ def rollout_policy(
     max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
     min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
     # MAIN ENV STEP LOOP
+    Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
+    ac_prev = None
     while episode < num_trajs:
         action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
+        state = agent_state[0].copy()
 
         feat = agent._wm.dynamics.get_feat(agent_state[0]).cpu().detach().numpy()
 
@@ -535,42 +356,74 @@ def rollout_policy(
         else:
             action = np.array(action)
 
-        ac_safe = pi_safe(feat, safe_policy)
-        ac_safe = (ac_safe + 1) * 0.5 * (max_ac - min_ac) + min_ac
-        val = V(feat, safe_policy)[0] # this is just to check the shape of feat
-        print('value', val)
-
+        ac_safe_norm = pi_safe(feat, safe_policy)
+        ac_unnorm = action['action']
         ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
-        qval = Q(feat, safe_policy, ac_norm)[0] # this is just to check the shape of feat
-        print('qvalue', qval)
-        qval2 = Q_v2(agent_state[0], ac_norm, agent)[0] 
-        print('qvalue2', qval2)
+        ac_safe = (ac_safe_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
 
+        # Create interpolation coefficients: shape (N_interp, 1)
+        N_interp = 10
+        t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
+        ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
+        #print('ac_norms', ac_norms.shape, ac_norm.shape)
+        ac_norms[:-1, -1] = ac_norm[0, -1]
 
-        if min(qval, qval2) < 0.6:
-            print('action is unsafe, using safe policy')
-            print('action', action['action'])
-            print('safe action', ac_safe)
-            action['action'] = torch.tensor(ac_safe, dtype=torch.float32).to(envs.device)
+        val = V(feat, safe_policy)[0] # this is just to check the shape of feat
+        qvals = Q(state, ac_norms)
+        qval = qvals[0]
+        print('V:',val)
+        #print('Q:',qvals)
+        
+        
+        if filter_mode == 'cbf':
+            thresh = cbf_gamma * val
+            valid_actions = (qvals >= thresh).astype(bool)
 
+            if np.any(valid_actions):
+                ac_idx = valid_actions.argmax()  # First index where condition is True
+            else:
+                ac_idx = -1  # Or None, or raise an exception
+            #if ac_idx != 0:
+            #    #print('CBF filtering!')
+            #elif ac_idx == -1:
+            #    #print("LR filtering")
+            ac_norm = ac_norms[ac_idx].cpu().unsqueeze(0).numpy()
+            action['action'] = (ac_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
+        elif filter_mode == 'least_restrictive' or filter_mode == 'lr':
+            if qval < thresh:
+                action['action'] = ac_safe
+        else: 
+            pass # do nothing, use the original action
 
+        if ac_prev is not None:
+            print('ac l2norm', np.linalg.norm(ac_prev - action['action'].squeeze()))
+        ac_prev = action['action'].squeeze()
+
+        #print('ac l2norm', np.linalg.norm(ac_unnorm - action['action'].squeeze()))
         obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
 
         done_vec = term_vec | trunc_vec
         done = done_vec.cpu().numpy()
         obs_vec['failure'] = info_vec['is_knocked_over']
 
-        episode += int(done.sum())
+        num_done = done.sum()
+        if num_done > 0:
+            print()
+            print('resetting!')
+            obs_vec, info = envs.reset()
+            obs_vec['failure'] = info['is_knocked_over']
+            done_vec = np.zeros(envs.num_envs, bool)
+
+            agent_state = None
+        episode += num_done
         
 
 
-if __name__ == "__main__":
-    args = tyro.cli(Args)
-    if args.exp_name is None:
-        args.exp_name = os.path.basename(__file__)[: -len(".py")]
-        run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+def main(args):
+    if args.use_gp:
+        run_name = 'FilterRolloutGP'
     else:
-        run_name = args.exp_name
+        run_name = 'FilterRolloutNoGP'
 
     args.logdir = f"runs/{run_name}"
     args.traindir = pathlib.Path(args.logdir) / "train_eps"
@@ -609,6 +462,16 @@ if __name__ == "__main__":
 
     envs = DreamerWrapper(envs)
     eval_envs = DreamerWrapper(eval_envs)
+    if args.capture_video or args.save_trajectory:
+        eval_output_dir = f"runs/{run_name}/videos"
+        if args.evaluate:
+            eval_output_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
+        print(f"Saving eval trajectories/videos to {eval_output_dir}")
+    if args.save_train_video_freq is not None:
+        save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
+        envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=max_episode_steps, video_fps=30)
+    eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory, save_video=args.capture_video, trajectory_name="trajectory", max_steps_per_video=max_episode_steps, video_fps=30)
+
     envs = SelectAction(envs)
     eval_envs = SelectAction(eval_envs)
     envs = UUID(envs)
@@ -617,15 +480,7 @@ if __name__ == "__main__":
     if isinstance(envs.action_space, gym.spaces.Dict):
         envs = FlattenActionSpaceWrapper(envs)
         eval_envs = FlattenActionSpaceWrapper(eval_envs)
-    if args.capture_video or args.save_trajectory:
-        eval_output_dir = f"runs/{run_name}/videos"
-        if args.evaluate:
-            eval_output_dir = f"{os.path.dirname(args.checkpoint)}/test_videos"
-        print(f"Saving eval trajectories/videos to {eval_output_dir}")
-        if args.save_train_video_freq is not None:
-            save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
-            envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=max_episode_steps, video_fps=30)
-        eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory, save_video=args.capture_video, trajectory_name="trajectory", max_steps_per_video=max_episode_steps, video_fps=30)
+    
     envs = ManiSkillVectorEnv(envs, args.num_envs, ignore_terminations=not args.partial_reset, record_metrics=True)
     eval_envs = ManiSkillVectorEnv(eval_envs, args.num_eval_envs, ignore_terminations=not args.eval_partial_reset, record_metrics=True)
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
@@ -747,7 +602,10 @@ if __name__ == "__main__":
     actor_optim=actor_optim,
     actor_gradient_steps=args.actor_gradient_steps,
     ).to(args.device)
-    filter_checkpoint = torch.load(args.filter_directory)
+    if args.use_gp:
+        filter_checkpoint = torch.load(args.filter_directory_gp)
+    else:
+        filter_checkpoint = torch.load(args.filter_directory_nogp)
     safe_policy.load_state_dict(filter_checkpoint)
 
 
@@ -758,10 +616,21 @@ if __name__ == "__main__":
 
     policy = functools.partial(agent, training=False)
 
-    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=1)
-    envs.reset()
-    print("GP metrics", agent.gp_metrics)
-    print("No GP metrics", agent.nogp_metrics)
+    
+    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=args.num_runs, thresh=args.filter_thresh, cbf_gamma=args.cbf_gamma, filter_mode=args.filter_mode)
+    #envs.reset()
+    #print('replay')
+    #replay_policy(policy, safe_policy, agent, eval_envs, '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/FilterRollout/videos/trajectory.h5')
+    #print("GP metrics", agent.gp_metrics)
+    #print("No GP metrics", agent.nogp_metrics)
+    envs.close()
+    eval_envs.close()
+    
 
 
+if __name__ == "__main__":
+    args = tyro.cli(Args)
 
+    
+    
+    main(args)
