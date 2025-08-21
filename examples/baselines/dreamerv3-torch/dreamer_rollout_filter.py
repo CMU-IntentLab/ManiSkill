@@ -186,6 +186,7 @@ class Dreamer(nn.Module):
         # latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"], sample=False) # type: ignore
 
         do_sample = True
+        # TODO: add logic for continuous latents
         if self._args.eval_state_mean:
             # latent["stoch"] = latent["mean"]
             do_sample = False
@@ -373,9 +374,6 @@ def rollout_policy(
 
         val = V(feat, safe_policy)[0] # this is just to check the shape of feat
         qvals = Q(state, ac_norms)
-
-        for i in range(5):
-            print(Q(state, ac_norms))
 
         qval = qvals[0]
         print('V:',val)
