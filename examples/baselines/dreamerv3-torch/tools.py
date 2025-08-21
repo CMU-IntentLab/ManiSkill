@@ -67,7 +67,15 @@ class Logger:
         self.step = step
         name = str(logdir)#.split('/')[-2] + '_' + str(logdir).split('/')[-1]
         # Initialize WandB
-        wandb.init(project="wm-test", config={"logdir": str(logdir)}, name=name)
+        self._wandb_disabled = False
+        try:
+            run = wandb.init(project="wm-test", config={"logdir": str(logdir)}, name=name)
+            if run is None:
+                print(f"[Logger] warning: wandb.init returned None; disabling wandb logging for {name}")
+                self._wandb_disabled = True
+        except Exception as e:
+            print(f"[Logger] warning: wandb.init failed ({type(e).__name__}: {e}); disabling wandb logging for {name}")
+            self._wandb_disabled = True
 
     def config(self, config_dict):
         # Convert PosixPath objects to strings
@@ -76,7 +84,8 @@ class Logger:
             for k, v in config_dict.items()
         }
         # Log the config
-        wandb.config.update(config_dict)
+        if not self._wandb_disabled:
+            wandb.config.update(config_dict)
 
     def scalar(self, name, value):
         self._scalars[name] = float(value)
@@ -97,14 +106,16 @@ class Logger:
         if print_cli:
             print(f"[{step}]", " / ".join(f"{k} {v:.1f}" for k, v in scalars))
         # Log metrics to WandB
-        metrics = {"step": step, **dict(scalars)}
-        wandb.log(metrics, step=step)
+        if not self._wandb_disabled:
+            metrics = {"step": step, **dict(scalars)}
+            wandb.log(metrics, step=step)
         
         for name, value in self._images.items():
             # Log images to WandB
-            if np.shape(value)[0] == 3:
-                value = np.transpose(value, (1, 2, 0))
-            wandb.log({name: [wandb.Image(value, caption=name)]}, step=step)
+            if not self._wandb_disabled:
+                if np.shape(value)[0] == 3:
+                    value = np.transpose(value, (1, 2, 0))
+                wandb.log({name: [wandb.Image(value, caption=name)]}, step=step)
 
         for name, value in self._videos.items():
             name = name if isinstance(name, str) else name.decode("utf-8")
@@ -113,7 +124,8 @@ class Logger:
             B, T, H, W, C = value.shape
             value = value.transpose(1, 4, 2, 0, 3).reshape((1, T, C, H, B * W))
             # Log videos to WandB
-            wandb.log({name: wandb.Video(value, fps=16, format="mp4")}, step=step)
+            if not self._wandb_disabled:
+                wandb.log({name: wandb.Video(value, fps=16, format="mp4")}, step=step)
 
         self._scalars = {}
         self._images = {}
@@ -132,7 +144,8 @@ class Logger:
 
     def offline_scalar(self, name, value, step):
         # Log scalar metrics to WandB
-        wandb.log({f"scalars/{name}": value}, step=step)
+        if not self._wandb_disabled:
+            wandb.log({f"scalars/{name}": value}, step=step)
 
     def offline_video(self, name, value, step):
         if np.issubdtype(value.dtype, np.floating):
@@ -140,7 +153,8 @@ class Logger:
         B, T, H, W, C = value.shape
         value = value.transpose(1, 4, 2, 0, 3).reshape((1, T, C, H, B * W))
         # Log videos to WandB
-        wandb.log({name: wandb.Video(value, fps=16, format="mp4")}, step=step)
+        if not self._wandb_disabled:
+            wandb.log({name: wandb.Video(value, fps=16, format="mp4")}, step=step)
 
 
 def fill_expert_dataset(config, cache):

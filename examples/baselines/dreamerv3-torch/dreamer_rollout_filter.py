@@ -13,9 +13,10 @@ import torch.nn as nn
 import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
-from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter # type: ignore
 
 # ManiSkill specific imports
+import h5py
 import mani_skill.envs
 from mani_skill.utils import gym_utils
 from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper, FlattenRGBDObservationWrapper
@@ -36,12 +37,11 @@ from PyHJ.utils.net.continuous import Actor, Critic
 from PyHJ.exploration import GaussianNoise
 from PyHJ.data import Batch
 
-import h5py
-to_np = lambda x: x.detach().cpu().numpy()
 
-
-from typing import Dict, Any, Union
 from config import Args
+import wandb
+
+to_np = lambda x: x.detach().cpu().numpy()
 
 def combine_dictionaries(
     one_dict: Dict[str, Any], other_dict: Dict[str, Any], take_half: bool = False
@@ -94,7 +94,7 @@ def make_dataset(episodes, args):
     
 
 class Logger:
-    def __init__(self, log_wandb=False, tensorboard: SummaryWriter = None) -> None:
+    def __init__(self, log_wandb=False, tensorboard: SummaryWriter = None) -> None: # type: ignore
         self.writer = tensorboard
         self.log_wandb = log_wandb
     def add_scalar(self, tag, scalar_value, step):
@@ -128,12 +128,12 @@ class Dreamer(nn.Module):
         ):  # compilation is not supported on windows
             self._wm = torch.compile(self._wm)
             self._task_behavior = torch.compile(self._task_behavior)
-        reward = lambda f, s, a: self._wm.heads["reward"](f).mean()
+        reward = lambda f, s, a: self._wm.heads["reward"](f).mean() # type: ignore
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
-            random=lambda: expl.Random(args, act_space),
-            plan2explore=lambda: expl.Plan2Explore(args, self._wm, reward),
-        )[args.expl_behavior]().to(self._args.device)
+            random=lambda: expl.Random(args, act_space), # type: ignore
+            plan2explore=lambda: expl.Plan2Explore(args, self._wm, reward), # type: ignore
+        )[args.expl_behavior]().to(self._args.device) # type: ignore
         self.hybrid = args.hybrid
         self.gp_metrics = np.array([0,0,0,0])
         self.nogp_metrics = np.array([0,0,0,0])
@@ -150,7 +150,7 @@ class Dreamer(nn.Module):
                 if self.hybrid and step < self._args.hybrid_steps:
                     learner_data, exp_data = (
                             next(self._dataset),
-                            next(self._expert_dataset),
+                            next(self._expert_dataset), # type: ignore
                         )
                     self._train(learner_data, expert_data=exp_data)
                 else:
@@ -164,7 +164,7 @@ class Dreamer(nn.Module):
                     self._logger.scalar(name, float(np.mean(values)))
                     self._metrics[name] = []
                 if self._args.video_pred_log:
-                    openl = self._wm.video_pred(next(self._dataset))
+                    openl = self._wm.video_pred(next(self._dataset)) # type: ignore
                     self._logger.video("train_openl", to_np(openl))
                 self._logger.write(fps=True)
 
@@ -181,19 +181,19 @@ class Dreamer(nn.Module):
             latent = action = None
         else:
             latent, action = state
-        obs = self._wm.preprocess(obs)
-        embed = self._wm.encoder(obs)
-        latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
+        obs = self._wm.preprocess(obs) # type: ignore
+        embed = self._wm.encoder(obs) # type: ignore
+        # latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"], sample=False) # type: ignore
 
-        
+        do_sample = True
         if self._args.eval_state_mean:
-            latent["stoch"] = latent["mean"]
-        feat = self._wm.dynamics.get_feat(latent)
+            # latent["stoch"] = latent["mean"]
+            do_sample = False
+        latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"], sample=do_sample) # type: ignore
+        feat = self._wm.dynamics.get_feat(latent) # type: ignore
 
-
-
-        gp = self._wm.heads["margin_gp"](feat)[0].item()
-        no_gp = self._wm.heads["margin_nogp"](feat)[0].item()
+        gp = self._wm.heads["margin_gp"](feat)[0].item() # type: ignore
+        no_gp = self._wm.heads["margin_nogp"](feat)[0].item() # type: ignore
 
         '''
         # metrics are TN, FP, TP, FN
@@ -296,9 +296,12 @@ def Q_v2(latent, action, policy, agent):
         }
 
     # model-based rollout
-    img_latent = agent._wm.dynamics.img_step(latent, action)
+    # img_latent = agent._wm.dynamics.img_step(latent, action)
+    do_sample = True
     if agent._args.eval_state_mean:
-        img_latent["stoch"] = img_latent["mean"]
+        # img_latent["stoch"] = img_latent["mean"]
+        do_sample = False
+    img_latent = agent._wm.dynamics.img_step(latent, action, sample=do_sample)
     img_feat = agent._wm.dynamics.get_feat(img_latent).cpu().detach().numpy()
     return V(img_feat, policy)
 
@@ -370,6 +373,10 @@ def rollout_policy(
 
         val = V(feat, safe_policy)[0] # this is just to check the shape of feat
         qvals = Q(state, ac_norms)
+
+        for i in range(5):
+            print(Q(state, ac_norms))
+
         qval = qvals[0]
         print('V:',val)
         #print('Q:',qvals)
@@ -425,7 +432,9 @@ def main(args):
     else:
         run_name = 'FilterRolloutNoGP'
 
-    args.logdir = f"runs/{run_name}"
+    # args.logdir = f"runs/{run_name}"
+    # add time to run name
+    args.logdir = f"runs/{run_name}_{time.strftime('%Y%m%d-%H%M%S')}"
     args.traindir = pathlib.Path(args.logdir) / "train_eps"
     args.evaldir = pathlib.Path(args.logdir) / "eval_eps"
     logdir = pathlib.Path(args.logdir).expanduser()
@@ -531,13 +540,6 @@ def main(args):
     agent.load_state_dict(checkpoint["agent_state_dict"])
     tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
     agent._should_pretrain._once = False
-
-
-
-
-    
-   
-
     # seed
     ac_space = spaces.Box(low=-1.0, high=1.0, shape=(7,), dtype=np.float32) # joint action space
     ob_space = spaces.Box(low=-np.inf, high=np.inf, shape=(1,1,1536,), dtype=np.float32)

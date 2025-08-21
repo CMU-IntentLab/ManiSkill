@@ -150,7 +150,7 @@ class Args:
     imag_horizon: int = 15
     imag_gradient: str = 'dynamics'
     imag_gradient_mix: float =  0.0
-    eval_state_mean: bool = False
+    eval_state_mean: bool = True
 
 
     encoder: Dict[str, Any] = field(default_factory=lambda:{'mlp_keys': 'state', 'cnn_keys': '.*\_cam$', 'act': 'SiLU', 'norm': True, 'cnn_depth': 32, 'kernel_size': 4, 'minres': 4, 'mlp_layers': 5, 'mlp_units': 1024, 'symlog_inputs': True})
@@ -206,9 +206,9 @@ class Args:
 
 
     use_gp: bool = False
-    wm_directory: str = "/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/wm_edit/wm_lz.pt"
-    filter_directory_nogp: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/no_gp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_1/epoch_id_20/policy.pth'
-    filter_directory_gp: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/LCRL/gp/noise_0.1_actor_lr_0.0001_critic_lr_0.001_batch_512_step_per_epoch_40000_kwargs_{}_seed_1/epoch_id_20/policy.pth'
+    wm_directory: str = "/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/kens_ckpts/wm_lz_aug6.pt"
+    filter_directory_nogp: str = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/kens_ckpts/no_gp_aug6.pth'
+    filter_directory_gp: str = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/kens_ckpts/gp_aug6.pth'
     filter_thresh: float = 0.2
     num_runs: int = 1
     cbf_gamma: float = 0.7
