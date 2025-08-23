@@ -349,10 +349,14 @@ def rollout_policy(
     min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
 
     # Record samples
+    knocked_over = False
+    successes = 0
     sample_values_all = []
     sample_values = []
     safe_values = []
     safe_values_all = []
+    taken_values = []
+    taken_values_all = []
 
     # MAIN ENV STEP LOOP
     Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
@@ -381,7 +385,7 @@ def rollout_policy(
         ac_safe = (ac_safe_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
 
         # Create interpolation coefficients: shape (N_interp, 1)
-        N_interp = 100
+        N_interp = 10
         t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
         ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
         #print('ac_norms', ac_norms.shape, ac_norm.shape)
@@ -409,6 +413,7 @@ def rollout_policy(
             if np.any(valid_actions):
                 ac_idx = valid_actions.argmax()  # First index where condition is True
             else:
+                print(f"\033[93mNo valid action for threshold {thresh:1.2e}, min value {np.min(qvals):1.2e}\033[0m")
                 ac_idx = -1  # Or None, or raise an exception
             #if ac_idx != 0:
             #    #print('CBF filtering!')
@@ -416,6 +421,10 @@ def rollout_policy(
             #    #print("LR filtering")
             ac_norm = ac_norms[ac_idx].cpu().unsqueeze(0).numpy()
             action['action'] = (ac_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
+
+            taken_values.append(qvals[ac_idx])
+            taken_values_all.append(qvals[ac_idx])
+
         elif filter_mode == 'least_restrictive' or filter_mode == 'lr':
             if qval < thresh:
                 action['action'] = ac_safe
@@ -432,6 +441,8 @@ def rollout_policy(
         done_vec = term_vec | trunc_vec
         done = done_vec.cpu().numpy()
         obs_vec['failure'] = info_vec['is_knocked_over']
+        knocked_over = knocked_over or info_vec['is_knocked_over'][0]
+        print(obs_vec['failure'])
 
         num_done = done.sum()
         if num_done > 0:
@@ -443,17 +454,21 @@ def rollout_policy(
 
             plt.plot(sample_values, color="grey")
             plt.plot(safe_values, color="green", linestyle='-', marker='x')
-            plt.savefig(output_dir / f"safe_sample_vals{episode}.png") # Another classic pythonism, using the division operator to join figures
+            plt.plot(taken_values, color="black", linestyle='-', marker='x')
+            plt.savefig(output_dir / f"safe_sample_vals{episode}.png")
             plt.clf()
 
             sample_values = []
             safe_values = []
+            taken_values = []
+            successes += 0 if knocked_over else 1
+            knocked_over = False
 
             agent_state = None
         episode += num_done
 
         
-    print("Done")
+    print(f"{successes} out of {num_trajs} successful")
 
 
 def main(args):
