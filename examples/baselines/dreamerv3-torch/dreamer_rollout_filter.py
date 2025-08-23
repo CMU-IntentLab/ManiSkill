@@ -13,7 +13,8 @@ import torch.nn as nn
 import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
-from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter # type: ignore
+import matplotlib.pyplot as plt
 
 # ManiSkill specific imports
 import h5py
@@ -342,6 +343,13 @@ def rollout_policy(
     # statistics from the offline dataset
     max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
     min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
+
+    # Record samples
+    sample_values_all = []
+    sample_values = []
+    safe_values = []
+    safe_values_all = []
+
     # MAIN ENV STEP LOOP
     Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
     ac_prev = None
@@ -369,19 +377,27 @@ def rollout_policy(
         ac_safe = (ac_safe_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
 
         # Create interpolation coefficients: shape (N_interp, 1)
-        N_interp = 10
+        N_interp = 100
         t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
         ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
         #print('ac_norms', ac_norms.shape, ac_norm.shape)
-        ac_norms[:-1, -1] = ac_norm[0, -1]
+        ac_norms[:-1, -1] = ac_norm[0, -1] # Override gripper with nominal
 
-        val = V(feat, safe_policy)[0] # this is just to check the shape of feat
+        # val = V(feat, safe_policy)[0] # this is just to check the shape of feat
         qvals = Q(state, ac_norms)
         qval = qvals[0]
         print('V:',val)
         #print('Q:',qvals)
         Vs[episode].append(val)
 
+
+        # Record for plotting
+        sample_values.append(qvals)
+        safe_values.append(val)
+        sample_values_all.append(qvals)
+        safe_values_all.append(val)
+        
+        
         if filter_mode == 'cbf':
             thresh = cbf_gamma * val
             valid_actions = (qvals >= thresh).astype(bool)
@@ -420,6 +436,15 @@ def rollout_policy(
             obs_vec, info = envs.reset()
             obs_vec['failure'] = info['is_knocked_over']
             done_vec = np.zeros(envs.num_envs, bool)
+
+            plt.plot(sample_values, color="grey")
+            plt.plot(safe_values, color="green", linestyle='-', marker='x')
+            plt.savefig(f"test{episode}.png")
+            plt.clf()
+
+            sample_values = []
+            safe_values = []
+
             agent_state = None
         episode += num_done
         
