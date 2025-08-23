@@ -339,6 +339,10 @@ def rollout_policy(
     done_vec = np.zeros(envs.num_envs, bool)
 
     agent_state = None
+
+    # get output dir for plots (there is likely a better way to do this)
+    output_dir = envs._env.env.env.output_dir.with_name('figs')
+    output_dir.mkdir(parents=True, exist_ok=True) 
     
     # statistics from the offline dataset
     max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
@@ -439,7 +443,7 @@ def rollout_policy(
 
             plt.plot(sample_values, color="grey")
             plt.plot(safe_values, color="green", linestyle='-', marker='x')
-            plt.savefig(f"safe_sample_vals{episode}.png")
+            plt.savefig(output_dir / f"safe_sample_vals{episode}.png") # Another classic pythonism, using the division operator to join figures
             plt.clf()
 
             sample_values = []
