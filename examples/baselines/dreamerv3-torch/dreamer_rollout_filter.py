@@ -383,8 +383,9 @@ def rollout_policy(
         #print('ac_norms', ac_norms.shape, ac_norm.shape)
         ac_norms[:-1, -1] = ac_norm[0, -1] # Override gripper with nominal
 
-        # val = V(feat, safe_policy)[0] # this is just to check the shape of feat
         qvals = Q(state, ac_norms)
+        val = qvals[-1] # Safe policy
+
         qval = qvals[0]
         print('V:',val)
         #print('Q:',qvals)
@@ -397,10 +398,9 @@ def rollout_policy(
         sample_values_all.append(qvals)
         safe_values_all.append(val)
         
-        
         if filter_mode == 'cbf':
-            thresh = cbf_gamma * val
-            valid_actions = (qvals >= thresh).astype(bool)
+            cbf_thresh = max(cbf_gamma * val, thresh)
+            valid_actions = (qvals >= cbf_thresh).astype(bool)
 
             if np.any(valid_actions):
                 ac_idx = valid_actions.argmax()  # First index where condition is True
@@ -439,7 +439,7 @@ def rollout_policy(
 
             plt.plot(sample_values, color="grey")
             plt.plot(safe_values, color="green", linestyle='-', marker='x')
-            plt.savefig(f"test{episode}.png")
+            plt.savefig(f"safe_sample_vals{episode}.png")
             plt.clf()
 
             sample_values = []
@@ -447,7 +447,9 @@ def rollout_policy(
 
             agent_state = None
         episode += num_done
+
         
+    print("Done")
 
 
 def main(args):
