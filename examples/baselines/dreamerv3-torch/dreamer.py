@@ -189,7 +189,8 @@ class Args:
     eval_state_mean: bool = False
 
     gamma_lx: float = 0.75
-    offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    # offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    offline_data_path: str = '/home/clown2/Desktop/Work/Research/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753474701/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     pretrain: int = 500
     hybrid_steps: int = 300_000
     hybrid: bool = True

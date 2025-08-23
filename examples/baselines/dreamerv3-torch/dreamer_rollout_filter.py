@@ -16,6 +16,7 @@ from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 
 # ManiSkill specific imports
+import h5py
 import mani_skill.envs
 from mani_skill.utils import gym_utils
 from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper, FlattenRGBDObservationWrapper
@@ -36,12 +37,11 @@ from PyHJ.utils.net.continuous import Actor, Critic
 from PyHJ.exploration import GaussianNoise
 from PyHJ.data import Batch
 
-import h5py
-to_np = lambda x: x.detach().cpu().numpy()
 
-
-from typing import Dict, Any, Union
 from config import Args
+import wandb
+
+to_np = lambda x: x.detach().cpu().numpy()
 
 def combine_dictionaries(
     one_dict: Dict[str, Any], other_dict: Dict[str, Any], take_half: bool = False
@@ -183,14 +183,15 @@ class Dreamer(nn.Module):
             latent, action = state
         obs = self._wm.preprocess(obs)
         embed = self._wm.encoder(obs)
-        latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
+        # latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"], sample=False)
 
-        
+        do_sample = True
+        # TODO: add logic for continuous latents
         if self._args.eval_state_mean:
-            latent["stoch"] = latent["mean"]
+            # latent["stoch"] = latent["mean"]
+            do_sample = False
+        latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"], sample=do_sample)
         feat = self._wm.dynamics.get_feat(latent)
-
-
 
         gp = self._wm.heads["margin_gp"](feat)[0].item()
         no_gp = self._wm.heads["margin_nogp"](feat)[0].item()
@@ -296,9 +297,12 @@ def Q_v2(latent, action, policy, agent):
         }
 
     # model-based rollout
-    img_latent = agent._wm.dynamics.img_step(latent, action)
+    # img_latent = agent._wm.dynamics.img_step(latent, action)
+    do_sample = True
     if agent._args.eval_state_mean:
-        img_latent["stoch"] = img_latent["mean"]
+        # img_latent["stoch"] = img_latent["mean"]
+        do_sample = False
+    img_latent = agent._wm.dynamics.img_step(latent, action, sample=do_sample)
     img_feat = agent._wm.dynamics.get_feat(img_latent).cpu().detach().numpy()
     return V(img_feat, policy)
 
@@ -341,6 +345,9 @@ def rollout_policy(
     # MAIN ENV STEP LOOP
     Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
     ac_prev = None
+
+    Vs = [[] for _ in range(num_trajs)]
+
     while episode < num_trajs:
         action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
         state = agent_state[0].copy()
@@ -373,8 +380,8 @@ def rollout_policy(
         qval = qvals[0]
         print('V:',val)
         #print('Q:',qvals)
-        
-        
+        Vs[episode].append(val)
+
         if filter_mode == 'cbf':
             thresh = cbf_gamma * val
             valid_actions = (qvals >= thresh).astype(bool)
@@ -413,7 +420,6 @@ def rollout_policy(
             obs_vec, info = envs.reset()
             obs_vec['failure'] = info['is_knocked_over']
             done_vec = np.zeros(envs.num_envs, bool)
-
             agent_state = None
         episode += num_done
         
@@ -424,6 +430,11 @@ def main(args):
         run_name = 'FilterRolloutGP'
     else:
         run_name = 'FilterRolloutNoGP'
+
+    # args.logdir = f"runs/{run_name}"
+    # add time to run name
+
+    run_name = f"{run_name}_{time.strftime('%Y%m%d-%H%M%S')}"
 
     args.logdir = f"runs/{run_name}"
     args.traindir = pathlib.Path(args.logdir) / "train_eps"
@@ -470,7 +481,7 @@ def main(args):
     if args.save_train_video_freq is not None:
         save_video_trigger = lambda x : (x // args.num_steps) % args.save_train_video_freq == 0
         envs = RecordEpisode(envs, output_dir=f"runs/{run_name}/train_videos", save_trajectory=False, save_video_trigger=save_video_trigger, max_steps_per_video=max_episode_steps, video_fps=30)
-    eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_trajectory=args.save_trajectory, save_video=args.capture_video, trajectory_name="trajectory", max_steps_per_video=max_episode_steps, video_fps=30)
+    eval_envs = RecordEpisode(eval_envs, output_dir=eval_output_dir, save_on_reset=True, save_trajectory=args.save_trajectory, save_video=args.capture_video, trajectory_name="trajectory", max_steps_per_video=max_episode_steps, video_fps=30)
 
     envs = SelectAction(envs)
     eval_envs = SelectAction(eval_envs)
@@ -531,13 +542,6 @@ def main(args):
     agent.load_state_dict(checkpoint["agent_state_dict"])
     tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
     agent._should_pretrain._once = False
-
-
-
-
-    
-   
-
     # seed
     ac_space = spaces.Box(low=-1.0, high=1.0, shape=(7,), dtype=np.float32) # joint action space
     ob_space = spaces.Box(low=-np.inf, high=np.inf, shape=(1,1,1536,), dtype=np.float32)
@@ -607,12 +611,6 @@ def main(args):
     else:
         filter_checkpoint = torch.load(args.filter_directory_nogp)
     safe_policy.load_state_dict(filter_checkpoint)
-
-
-
-
-
-
 
     policy = functools.partial(agent, training=False)
 
