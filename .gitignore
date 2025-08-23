@@ -50,3 +50,6 @@ htmlcov/
 *.h5
 
 **/wandb/
+runs/
+kens_ckpts/
+test.ipynb
