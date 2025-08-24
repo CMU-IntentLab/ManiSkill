@@ -442,7 +442,6 @@ def rollout_policy(
         done = done_vec.cpu().numpy()
         obs_vec['failure'] = info_vec['is_knocked_over']
         knocked_over = knocked_over or info_vec['is_knocked_over'][0]
-        print(obs_vec['failure'])
 
         num_done = done.sum()
         if num_done > 0:
@@ -467,7 +466,12 @@ def rollout_policy(
             agent_state = None
         episode += num_done
 
-        
+    plt.clf()
+    plt.scatter(taken_values_all[:-1], np.array(safe_values_all[1:]) - np.array(taken_values_all[:-1]), marker='.')
+    plt.xlabel('Q(x, u)')
+    plt.ylabel('Q(f(x, u), pi_safe) - Q(x, u)')
+    plt.savefig(output_dir / 'actual_vs_take.png')
+
     print(f"{successes} out of {num_trajs} successful")
 
 
