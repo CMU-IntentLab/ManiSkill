@@ -56,5 +56,5 @@ htmlcov/
 
 **/wandb/
 runs/
-kens_ckpts/
+ckpt_data/
 test.ipynb
