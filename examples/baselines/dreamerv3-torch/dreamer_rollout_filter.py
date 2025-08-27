@@ -623,9 +623,6 @@ def main(args):
     else:
         run_name = 'FilterRolloutNoGP'
 
-    # args.logdir = f"runs/{run_name}"
-    # add time to run name
-
     run_name = f"{run_name}_{time.strftime('%Y%m%d-%H%M%S')}"
 
     args.logdir = f"runs/{run_name}"
