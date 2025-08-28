@@ -38,6 +38,8 @@ from PyHJ.utils.net.continuous import Actor, Critic
 from PyHJ.exploration import GaussianNoise
 from PyHJ.data import Batch
 
+from itertools import product
+
 
 from config import Args
 import wandb
@@ -304,13 +306,14 @@ def Q_v2(latent, action, policy, agent):
         # img_latent["stoch"] = img_latent["mean"]
         do_sample = False
     img_latent = agent._wm.dynamics.img_step(latent, action, sample=do_sample)
-    img_feat = agent._wm.dynamics.get_feat(img_latent).cpu().detach().numpy()
-    return V(img_feat, policy)
+    img_feat = agent._wm.dynamics.get_feat(img_latent).cpu().detach()#.numpy()
+    return V(img_feat.numpy(), policy)
 
 def Qfn(agent_state, actions, agent, safe_policy):
     feat = agent._wm.dynamics.get_feat(agent_state).cpu().detach().numpy()
     q1 = Q_v1(feat, actions, safe_policy)
     q2 = Q_v2(agent_state, actions, safe_policy, agent)
+    
     return np.minimum(q1, q2)
 
 def pi_safe(state, policy):
@@ -388,7 +391,12 @@ def rollout_policy(
         N_interp = 10
         t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
         ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
-        #print('ac_norms', ac_norms.shape, ac_norm.shape)
+        print('ac_norms', ac_norms.shape, ac_norm.shape)
+        
+        # ac_unnorms = torch.tensor(list(product(torch.linspace(-1, 1, 5).tolist(), repeat=6)))
+        # ac_unnorms = torch.cat([ac_unnorms, torch.zeros(ac_unnorms.shape[0], 1)], dim=1)
+        # ac_unnorms = torch.cat([ac_unnorms, torch.from_numpy(ac_unnorm), torch.from_numpy(ac_safe)], dim=0)
+        # ac_norms = (ac_unnorms - min_ac) / (max_ac - min_ac) * 2 - 1
         ac_norms[:-1, -1] = ac_norm[0, -1] # Override gripper with nominal
 
         qvals = Q(state, ac_norms)
@@ -411,10 +419,11 @@ def rollout_policy(
             valid_actions = (qvals >= cbf_thresh).astype(bool)
 
             if np.any(valid_actions):
-                ac_idx = valid_actions.argmax()  # First index where condition is True
+                ac_idx = torch.norm(ac_norms[valid_actions] - torch.from_numpy(ac_norm), dim = 1).argmin()  # First index where condition is True
+                ac_idx = np.nonzero(valid_actions)[0][ac_idx] # Get index into full ac_norms
             else:
-                print(f"\033[93mNo valid action for threshold {thresh:1.2e}, min value {np.min(qvals):1.2e}\033[0m")
-                ac_idx = -1  # Or None, or raise an exception
+                print(f"\033[93mNo valid action for threshold {thresh:1.2e}, min value {np.max(qvals):1.2e}\033[0m")
+                ac_idx = qvals.argmax()
             #if ac_idx != 0:
             #    #print('CBF filtering!')
             #elif ac_idx == -1:
