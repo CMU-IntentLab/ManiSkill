@@ -15,6 +15,7 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter # type: ignore
 import matplotlib.pyplot as plt
+from itertools import product
 
 # ManiSkill specific imports
 import h5py
@@ -37,8 +38,6 @@ from PyHJ.utils.net.common import Net
 from PyHJ.utils.net.continuous import Actor, Critic
 from PyHJ.exploration import GaussianNoise
 from PyHJ.data import Batch
-
-from itertools import product
 
 
 from config import Args
@@ -306,14 +305,13 @@ def Q_v2(latent, action, policy, agent):
         # img_latent["stoch"] = img_latent["mean"]
         do_sample = False
     img_latent = agent._wm.dynamics.img_step(latent, action, sample=do_sample)
-    img_feat = agent._wm.dynamics.get_feat(img_latent).cpu().detach()#.numpy()
-    return V(img_feat.numpy(), policy)
+    img_feat = agent._wm.dynamics.get_feat(img_latent).cpu().detach().numpy()
+    return V(img_feat, policy)
 
 def Qfn(agent_state, actions, agent, safe_policy):
     feat = agent._wm.dynamics.get_feat(agent_state).cpu().detach().numpy()
     q1 = Q_v1(feat, actions, safe_policy)
     q2 = Q_v2(agent_state, actions, safe_policy, agent)
-    
     return np.minimum(q1, q2)
 
 def pi_safe(state, policy):
@@ -321,7 +319,17 @@ def pi_safe(state, policy):
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
     return policy(tmp_batch, model="actor_old").act.cpu().detach().numpy()#.flatten()
 
-
+def pi_test(envs, action): # Move the gripper over the green block for testing the filter with a simple policy
+    env_agent = envs.unwrapped.agent
+    ee_pose = env_agent.robot.links_map[env_agent.ee_link_name].pose.raw_pose.cpu().detach().numpy()
+    env_block = envs.unwrapped.block3
+    block_pose = env_block.pose.raw_pose.cpu().detach().numpy()
+    err = block_pose[0, :3] - ee_pose[0, :3]
+    err[2] += 0.1
+    action['action'] = 0*action['action']
+    action['action'][0, :3] = np.clip(err, -0.2, 0.2)
+    action['action'][0, 6] = 0.5
+    return action
 
 def rollout_policy(
     nom_policy,
@@ -381,7 +389,7 @@ def rollout_policy(
             action = {k: np.array(action[k].detach().cpu()) for k in action}
         else:
             action = np.array(action)
-
+        
         ac_safe_norm = pi_safe(feat, safe_policy)
         ac_unnorm = action['action']
         ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
@@ -392,10 +400,15 @@ def rollout_policy(
         t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
         ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
         print('ac_norms', ac_norms.shape, ac_norm.shape)
+
+        # Other sampling methods
+        # ac_unnorms = torch.from_numpy(np.row_stack([np.linspace(ac_unnorm.flatten(), ac_safe.flatten(), 20), 
+        #                            np.linspace(ac_unnorm.flatten(), 0*ac_unnorm.flatten(), 20), 
+        #                            np.linspace(0*ac_unnorm.flatten(), ac_safe.flatten(), 20)]))
         
-        # ac_unnorms = torch.tensor(list(product(torch.linspace(-1, 1, 5).tolist(), repeat=6)))
-        # ac_unnorms = torch.cat([ac_unnorms, torch.zeros(ac_unnorms.shape[0], 1)], dim=1)
-        # ac_unnorms = torch.cat([ac_unnorms, torch.from_numpy(ac_unnorm), torch.from_numpy(ac_safe)], dim=0)
+        # # ac_unnorms = torch.tensor(list(product(torch.linspace(-1, 1, 5).tolist(), repeat=6)))
+        # # ac_unnorms = torch.cat([ac_unnorms, torch.zeros(ac_unnorms.shape[0], 1)], dim=1)
+        # # ac_unnorms = torch.cat([ac_unnorms, torch.from_numpy(ac_unnorm), torch.from_numpy(ac_safe)], dim=0)
         # ac_norms = (ac_unnorms - min_ac) / (max_ac - min_ac) * 2 - 1
         ac_norms[:-1, -1] = ac_norm[0, -1] # Override gripper with nominal
 
@@ -415,7 +428,7 @@ def rollout_policy(
         safe_values_all.append(val)
         
         if filter_mode == 'cbf':
-            cbf_thresh = max(cbf_gamma * val, thresh)
+            cbf_thresh = max(cbf_gamma * max(val - thresh, 0), thresh)
             valid_actions = (qvals >= cbf_thresh).astype(bool)
 
             if np.any(valid_actions):
