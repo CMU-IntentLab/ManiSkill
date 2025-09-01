@@ -8,11 +8,18 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-dreamer_dir = os.path.abspath('/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch')
+# dreamer_dir = os.path.abspath('/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch')
+dreamer_dir = os.path.abspath('/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch')
 sys.path.append(dreamer_dir)
 
-maniskill_dir = os.path.abspath('/home/kensuke/WM_CBF/ManiSkill/mani_skill')
+# maniskill_dir = os.path.abspath('/home/kensuke/WM_CBF/ManiSkill/mani_skill')
+maniskill_dir = os.path.abspath('/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/mani_skill')
 sys.path.append(maniskill_dir)
+
+
+pyHJ_dir = os.path.abspath('/home/clown2/Desktop/Work/Research/ManiSkill/PytorchReachability')
+sys.path.append(pyHJ_dir)
+
 import models
 import tools
 import ruamel.yaml as yaml
@@ -87,7 +94,9 @@ def main(args):
 
     wm = models.WorldModel(observation_space, action_space, 0, config)
 
-    checkpoint = torch.load("/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/wm_edit/wm_lz.pt")
+    # checkpoint = torch.load("/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/wm_edit/wm_lz.pt")
+    # checkpoint = torch.load("/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer__1__1756605634/latest.pt")
+    checkpoint = torch.load("/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer__1__1756698045/latest.pt")
 
     state_dict = {k[14:]:v for k,v in checkpoint['agent_state_dict'].items() if '_wm' in k}
 
@@ -98,13 +107,15 @@ def main(args):
     config.batch_size = 1
     config.batch_length = 5
     expert_eps = collections.OrderedDict()
-    config.offline_data_path = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    # config.offline_data_path = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1756574937/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    config.offline_data_path = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch/runs/FilterRolloutGP_20250831-214144/videos/trajectory_mixed.h5'
     tools.fill_expert_dataset(config, expert_eps)
     expert_dataset = make_dataset(expert_eps, config)
 
 
     # NOTE: you can replace this with the dataset you made for the dubins wm training
-    directory = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer__1__1753312973/train_eps'
+    # directory = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer__1__1756605634/train_eps'
+    directory = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer__1__1756698045/train_eps'
     train_eps = tools.load_episodes(directory, limit=config.dataset_size)
     train_dataset = make_dataset(train_eps, config)
 
@@ -172,7 +183,8 @@ def main(args):
 
     log_path = None
 
-    from PyHJ.policy import avoid_DDPGPolicy_annealing_acreg as DDPGPolicy
+    # from PyHJ.policy import avoid_DDPGPolicy_annealing_acreg as DDPGPolicy
+    from PyHJ.policy.modelfree.ddpg_avoid_classical_acreg import avoid_DDPGPolicy_annealing_acreg as DDPGPolicy
 
     print("DDPG under the Avoid annealed Bellman equation with no Disturbance has been loaded!")
 

@@ -243,6 +243,46 @@ def V(state, policy):
     tmp = policy.critic(tmp_batch.obs, ac)
     return tmp.cpu().detach().numpy().flatten()
 
+def Q_v1(state, action, policy):
+    if isinstance(action, dict):
+        action = action['action']
+    b, _ = action.shape
+    if state.shape[0] != b:
+        state = np.repeat(state, repeats=b, axis=0)
+    tmp_obs = np.array(state)#.reshape(1,-1)
+    tmp_batch = Batch(obs = tmp_obs, info = Batch())
+    tmp = policy.critic(tmp_batch.obs, action)
+    return tmp.cpu().detach().numpy().flatten()
+
+def Q_v2(latent, action, policy, agent):
+    if isinstance(action, dict):
+        action = action['action']
+    action = torch.tensor(action, dtype=torch.float32).to(latent['stoch'].device)
+
+    # batch computation
+    b, _ = action.shape
+    if latent['stoch'].shape[0] != b:
+        latent = {
+            k: v.repeat(b, *([1] * (v.ndim - 1)))
+            for k, v in latent.items()
+        }
+
+    # model-based rollout
+    # img_latent = agent._wm.dynamics.img_step(latent, action)
+    do_sample = True
+    if agent._args.eval_state_mean:
+        # img_latent["stoch"] = img_latent["mean"]
+        do_sample = False
+    img_latent = agent._wm.dynamics.img_step(latent, action, sample=do_sample)
+    img_feat = agent._wm.dynamics.get_feat(img_latent).cpu().detach().numpy()
+    return V(img_feat, policy)
+
+def Qfn(agent_state, actions, agent, safe_policy):
+    feat = agent._wm.dynamics.get_feat(agent_state).cpu().detach().numpy()
+    q1 = Q_v1(feat, actions, safe_policy)
+    q2 = Q_v2(agent_state, actions, safe_policy, agent)
+    return np.minimum(q1, q2)
+
 
 def traj_stats(
         nom_policy,
@@ -258,6 +298,7 @@ def traj_stats(
     V_total = []
     Lz_noGP_total = []
     gt_failure_total = []
+    success_total = []
 
     for ep in offline_data:
         print('\nEpisode:', traj_counter)
@@ -269,6 +310,7 @@ def traj_stats(
         V_episode = []
         Lz_noGP_episode = []
         gt_failure_episode = []
+        success_episode = []
 
         for ep_step in ep:
             print(f'\rTimestep:{ep_tstep}', end='', flush=True)
@@ -285,12 +327,14 @@ def traj_stats(
             V_episode.append(val)
             Lz_noGP_episode.append(l_gp)
             gt_failure_episode.append(gt_failure)
+            success_episode.append(obs_vec['success'][0])
 
         V_total.append(V_episode.copy())
         Lz_noGP_total.append(Lz_noGP_episode.copy())
         gt_failure_total.append(gt_failure_episode.copy())
+        success_total.append(success_episode.copy())
 
-    return V_total, Lz_noGP_total, gt_failure_total
+    return V_total, Lz_noGP_total, gt_failure_total, success_total
 
 def main(args, offline_trajs):
     if args.use_gp:
@@ -474,11 +518,11 @@ def main(args, offline_trajs):
     safe_policy.load_state_dict(filter_checkpoint)
 
     policy = functools.partial(agent, training=False)
-    V_total, Lz_noGP_total, gt_failure_total = traj_stats(policy, safe_policy, agent, eval_envs, offline_trajs)
+    V_total, Lz_noGP_total, gt_failure_total, success_total = traj_stats(policy, safe_policy, agent, eval_envs, offline_trajs)
     envs.close()
     eval_envs.close()
 
-    return V_total, Lz_noGP_total, gt_failure_total
+    return V_total, Lz_noGP_total, gt_failure_total, success_total
 
 
 def sample_episodes(episodes):
@@ -516,7 +560,8 @@ def make_offline_dataset(episodes):
 @dataclass
 class DummyConfigs:
     # should have this ckpt_data/ppo_trajs directory in the Maniskill folder in the repo
-    offline_data_path = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/ckpt_data/ppo_trajs/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    # offline_data_path = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/ckpt_data/ppo_trajs/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    offline_data_path = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/ckpt_data/eval_trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     batch_length = 16
     batch_size = 32
 
@@ -532,8 +577,8 @@ if __name__ == "__main__":
     fill_expert_dataset(config, offline_trajs)
     traj_dataset = make_offline_dataset(offline_trajs)
 
-    V_total, Lz_noGP_total, gt_failure_total = main(args, traj_dataset)
+    V_total, Lz_noGP_total, gt_failure_total, success_total = main(args, traj_dataset)
     offline_data_dir = '/'.join((config.offline_data_path).split('/')[:-1]) + '/'
 
-    with open(offline_data_dir + "traj_stats.pkl", "wb") as f:
-        pickle.dump((V_total, Lz_noGP_total, gt_failure_total), f)
+    with open(offline_data_dir + "traj_stats_eval.pkl", "wb") as f:
+        pickle.dump((V_total, Lz_noGP_total, gt_failure_total, success_total), f)

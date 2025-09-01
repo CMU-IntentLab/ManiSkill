@@ -58,3 +58,5 @@ htmlcov/
 runs/
 ckpt_data/
 test.ipynb
+
+**/LCRL/
