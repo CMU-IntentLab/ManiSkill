@@ -362,18 +362,13 @@ def rollout_policy(
     # Record samples
     knocked_over = False
     successes = 0
-    sample_values_all = []
-    sample_values = []
-    safe_values = []
-    safe_values_all = []
-    taken_values = []
-    taken_values_all = []
+    sample_vals = [[] for _ in range(num_trajs)]
+    safe_vals = [[] for _ in range(num_trajs)]
+    taken_vals = [[] for _ in range(num_trajs)]
 
     # MAIN ENV STEP LOOP
     Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
     ac_prev = None
-
-    Vs = [[] for _ in range(num_trajs)]
 
     while episode < num_trajs:
         action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
@@ -414,18 +409,12 @@ def rollout_policy(
 
         qvals = Q(state, ac_norms)
         val = qvals[-1] # Safe policy
-
         qval = qvals[0]
         print('V:',val)
-        #print('Q:',qvals)
-        Vs[episode].append(val)
-
 
         # Record for plotting
-        sample_values.append(qvals)
-        safe_values.append(val)
-        sample_values_all.append(qvals)
-        safe_values_all.append(val)
+        sample_vals[episode].append(qvals)
+        safe_vals[episode].append(val)
         
         if filter_mode == 'cbf':
             cbf_thresh = max(cbf_gamma * max(val - thresh, 0), thresh)
@@ -443,9 +432,8 @@ def rollout_policy(
             #    #print("LR filtering")
             ac_norm = ac_norms[ac_idx].cpu().unsqueeze(0).numpy()
             action['action'] = (ac_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
-
-            taken_values.append(qvals[ac_idx])
-            taken_values_all.append(qvals[ac_idx])
+            
+            taken_vals[episode].append(qvals[ac_idx])
 
         elif filter_mode == 'least_restrictive' or filter_mode == 'lr':
             if qval < thresh:
@@ -473,15 +461,12 @@ def rollout_policy(
             obs_vec['failure'] = info['is_knocked_over']
             done_vec = np.zeros(envs.num_envs, bool)
 
-            plt.plot(sample_values, color="grey")
-            plt.plot(safe_values, color="green", linestyle='-', marker='x')
-            plt.plot(taken_values, color="black", linestyle='-', marker='x')
+            plt.plot(sample_vals[episode], color="grey")
+            plt.plot(safe_vals[episode], color="green", linestyle='-', marker='x')
+            plt.plot(taken_vals[episode], color="black", linestyle='-', marker='x')
             plt.savefig(output_dir / f"safe_sample_vals{episode}.png")
             plt.clf()
 
-            sample_values = []
-            safe_values = []
-            taken_values = []
             successes += 0 if knocked_over else 1
             knocked_over = False
 
@@ -489,7 +474,9 @@ def rollout_policy(
         episode += num_done
 
     plt.clf()
-    plt.scatter(taken_values_all[:-1], np.array(safe_values_all[1:]) - np.array(taken_values_all[:-1]), marker='.')
+    taken = np.concatenate(taken_vals)
+    safe = np.concatenate(safe_vals)
+    plt.scatter(taken[:-1], safe[1:] - taken[:-1], marker='.')
     plt.xlabel('Q(x, u)')
     plt.ylabel('Q(f(x, u), pi_safe) - Q(x, u)')
     plt.savefig(output_dir / 'actual_vs_take.png')
