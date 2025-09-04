@@ -16,6 +16,8 @@ from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter # type: ignore
 import matplotlib.pyplot as plt
 from itertools import product
+import imageio.v2 as imageio
+from pydrake.all import (MathematicalProgram, Solve, ClarabelSolver)
 
 # ManiSkill specific imports
 import h5py
@@ -312,12 +314,30 @@ def Qfn(agent_state, actions, agent, safe_policy):
     feat = agent._wm.dynamics.get_feat(agent_state).cpu().detach().numpy()
     q1 = Q_v1(feat, actions, safe_policy)
     q2 = Q_v2(agent_state, actions, safe_policy, agent)
-    return np.minimum(q1, q2)
+    return np.minimum(q1, q1)
 
 def pi_safe(state, policy):
     tmp_obs = np.array(state)#.reshape(1,-1)
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
     return policy(tmp_batch, model="actor_old").act.cpu().detach().numpy()#.flatten()
+
+def get_ee_pose(envs):
+    env_agent = envs.unwrapped.agent
+    ee_pose = env_agent.robot.links_map[env_agent.ee_link_name].pose.raw_pose.cpu().detach().numpy()
+    return ee_pose
+
+def get_block_pose(envs):
+    env_block = envs.unwrapped.block3
+    block_pose = env_block.pose.raw_pose.cpu().detach().numpy()
+    return block_pose
+
+def steer_to_pose(envs, action, des_pose):
+    ee_pose = get_ee_pose(envs)
+    err = des_pose - ee_pose[0, :3]
+    action['action'] = 0*action['action']
+    action['action'][0, :3] = np.clip(err, -0.2, 0.2)
+    action['action'][0, 6] = 0.5
+    return action
 
 def pi_test(envs, action): # Move the gripper over the green block for testing the filter with a simple policy
     env_agent = envs.unwrapped.agent
@@ -326,10 +346,121 @@ def pi_test(envs, action): # Move the gripper over the green block for testing t
     block_pose = env_block.pose.raw_pose.cpu().detach().numpy()
     err = block_pose[0, :3] - ee_pose[0, :3]
     err[2] += 0.1
+    err[0] -= 0.035
+    err[1] -= 0.05
     action['action'] = 0*action['action']
-    action['action'][0, :3] = np.clip(err, -0.2, 0.2)
+    action['action'][0, :3] = np.clip(10*err, -0.2, 0.2)
     action['action'][0, 6] = 0.5
     return action
+
+def pi_sweep(envs, action):
+    action['action'] = 0*action['action']
+    action['action'][0, 1] = 0.0
+    action['action'][0, 6] = 0.5
+    return action
+
+# Sweeps the actions from an initial condition
+def sweep_action(envs, action, i):
+    # envs.reset()
+    state = envs.unwrapped.get_state().detach().clone()
+    action['action'] = 0*action['action']
+    N = 100
+    delta_ee = np.zeros((10, N))
+    for (k, u) in enumerate(np.linspace(-1, 1, N)):
+        start_pose = get_ee_pose(envs)
+        action['action'][0, i] = u
+        for j in range(10):
+            envs.step(action)
+            delta_pose = get_ee_pose(envs) - start_pose
+            delta_ee[j, k] = delta_pose[0, i]
+        envs.unwrapped.set_state(state)
+        print(k)
+    return delta_ee
+
+def bang_bang_test(envs, action, u, i):
+    envs.reset()
+    state = envs.unwrapped.get_state().detach().clone()
+    action['action'] = 0*action['action']
+    action['action'][0, i] = u
+    N = 10
+    delta_ee = np.zeros((2, 10))
+    start_pose = get_ee_pose(envs)
+    for k in range(N):
+        envs.step(action)
+        delta_pose = get_ee_pose(envs) - start_pose
+        if k > N/2:
+            action['action'][0, i] = 0
+        delta_ee[0, k] = delta_pose[0, i]
+        delta_ee[1, k] = action['action'][0, i]/5
+        print(k)
+    return delta_ee
+
+class EndEffectorMPC:
+    def __init__(self, goal_pos, Q, R, horizon):
+        self.Q = Q
+        self.R = R
+        self.horizon = horizon
+        A = np.eye(3)
+        B = np.diag([0.04, 0.015, 0.0175]) # Approximate delta rates
+
+        # Program and variables
+        self.prog = MathematicalProgram()
+        self.q_sym = [self.prog.NewContinuousVariables(3, f"q_{k}") for k in range(horizon + 1)]
+        self.u_sym = [self.prog.NewContinuousVariables(3, f"u_{k}") for k in range(horizon)]
+
+        # Dynamics constraint
+        for k in range(horizon):
+            self.prog.AddConstraint(np.equal(A@self.q_sym[k] + B@self.u_sym[k], self.q_sym[k+1], dtype=object))
+
+        # Initial condition constraint
+        self.ic_constraint = self.prog.AddConstraint(np.equal(self.q_sym[k], np.zeros(3), dtype=object))
+
+        # Control limit constraints
+        self.prog.AddBoundingBoxConstraint(-0.5, 0.5, np.concatenate(self.u_sym))
+
+        # Tracking costs
+        self.add_tracking_cost(goal_pos)
+
+        # Init solver
+        self.solver = ClarabelSolver()
+
+        # Dumb state machine
+        self.state = 0
+        self.noise_level = np.random.choice([0, 0.01, 0.02, 0.03])
+
+    def add_tracking_cost(self, goal_pos):
+        # Clear costs
+        [self.prog.RemoveCost(c) for c in self.prog.GetAllCosts()]
+
+        self.goal_pos = goal_pos
+        for k in range(self.horizon):
+            self.prog.AddCost((self.q_sym[k+1] - goal_pos).dot(self.Q@(self.q_sym[k+1] - goal_pos)))
+            self.prog.AddCost(self.u_sym[k].dot(self.R@self.u_sym[k]))
+
+    def set_initial_condition(self, q_ic):
+        self.prog.RemoveConstraint(self.ic_constraint)
+        self.ic_constraint = self.prog.AddConstraint(np.equal(self.q_sym[0], q_ic, dtype=object))
+ 
+    def get_action(self, q_ic, action):
+        self.set_initial_condition(q_ic)
+        result = self.solver.Solve(self.prog)
+
+        # Dumb state machine
+        action['action'] = 0*action['action']
+        if self.state == 0 and np.linalg.norm(self.goal_pos - q_ic) >= 1e-3:
+            action['action'][0, :3] = result.GetSolution(self.u_sym[0]) + self.noise_level*np.random.randn(3)
+            action['action'][0, 6] = 0.55
+        elif self.state < 10:
+            self.state += 1
+            action['action'][0, 6] = 0
+        elif self.state == 10:
+            self.R = np.diag(10**np.random.uniform(-2, 0, size=3))
+            self.add_tracking_cost(np.array([0, np.random.choice([-0.2, -0.1, 0, 0.1, 0.2]), 0.4]))
+            self.state += 1
+        else:
+            action['action'][0, :3] = result.GetSolution(self.u_sym[0]) + self.noise_level*np.random.randn(3)
+            action['action'][0, 6] = 0
+        return action
 
 def rollout_policy(
     nom_policy,
@@ -370,6 +501,8 @@ def rollout_policy(
     Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
     ac_prev = None
 
+    mpc = EndEffectorMPC(get_block_pose(envs)[0, :3] + np.random.uniform(low=np.array([-0.05, -0.05, 0.075]), high=np.array([0.05, 0.05, 0.125])), np.eye(3), 1e-2*np.eye(3), 10)
+    outcomes = {"fail":[],"grasped":[],"lifted":[],"success":[]}
     while episode < num_trajs:
         action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
         state = agent_state[0].copy()
@@ -385,64 +518,63 @@ def rollout_policy(
         else:
             action = np.array(action)
         
-        ac_safe_norm = pi_safe(feat, safe_policy)
-        ac_unnorm = action['action']
-        ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
-        ac_safe = (ac_safe_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
+        # ac_safe_norm = pi_safe(feat, safe_policy)
+        # ac_unnorm = action['action']
+        # ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
+        # ac_safe = (ac_safe_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
 
-        # Create interpolation coefficients: shape (N_interp, 1)
-        N_interp = 10
-        t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
-        ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
-        print('ac_norms', ac_norms.shape, ac_norm.shape)
+        # # Create interpolation coefficients: shape (N_interp, 1)
+        # N_interp = 10
+        # t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
+        # ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
+        # print('ac_norms', ac_norms.shape, ac_norm.shape)
 
-        # Other sampling methods
-        # ac_unnorms = torch.from_numpy(np.row_stack([np.linspace(ac_unnorm.flatten(), ac_safe.flatten(), 20), 
-        #                            np.linspace(ac_unnorm.flatten(), 0*ac_unnorm.flatten(), 20), 
-        #                            np.linspace(0*ac_unnorm.flatten(), ac_safe.flatten(), 20)]))
+        # # Other sampling methods
+        # # ac_unnorms = torch.from_numpy(np.row_stack([np.linspace(ac_unnorm.flatten(), ac_safe.flatten(), 20), 
+        # #                            np.linspace(ac_unnorm.flatten(), 0*ac_unnorm.flatten(), 20), 
+        # #                            np.linspace(0*ac_unnorm.flatten(), ac_safe.flatten(), 20)]))
         
-        # # ac_unnorms = torch.tensor(list(product(torch.linspace(-1, 1, 5).tolist(), repeat=6)))
-        # # ac_unnorms = torch.cat([ac_unnorms, torch.zeros(ac_unnorms.shape[0], 1)], dim=1)
-        # # ac_unnorms = torch.cat([ac_unnorms, torch.from_numpy(ac_unnorm), torch.from_numpy(ac_safe)], dim=0)
-        # ac_norms = (ac_unnorms - min_ac) / (max_ac - min_ac) * 2 - 1
-        ac_norms[:-1, -1] = ac_norm[0, -1] # Override gripper with nominal
+        # # # ac_unnorms = torch.tensor(list(product(torch.linspace(-1, 1, 5).tolist(), repeat=6)))
+        # # # ac_unnorms = torch.cat([ac_unnorms, torch.zeros(ac_unnorms.shape[0], 1)], dim=1)
+        # # # ac_unnorms = torch.cat([ac_unnorms, torch.from_numpy(ac_unnorm), torch.from_numpy(ac_safe)], dim=0)
+        # # ac_norms = (ac_unnorms - min_ac) / (max_ac - min_ac) * 2 - 1
+        # ac_norms[:-1, -1] = ac_norm[0, -1] # Override gripper with nominal
 
-        qvals = Q(state, ac_norms)
-        val = qvals[-1] # Safe policy
-        qval = qvals[0]
-        print('V:',val)
+        # qvals = Q(state, ac_norms)
+        # val = qvals[-1] # Safe policy
+        # qval = qvals[0]
+        # print('V:',val)
 
-        # Record for plotting
-        sample_vals[episode].append(qvals)
-        safe_vals[episode].append(val)
+        # # Record for plotting
+        # sample_vals[episode].append(qvals)
+        # safe_vals[episode].append(val)
         
-        if filter_mode == 'cbf':
-            cbf_thresh = max(cbf_gamma * max(val - thresh, 0), thresh)
-            valid_actions = (qvals >= cbf_thresh).astype(bool)
+        # if filter_mode == 'cbf':
+        #     cbf_thresh = max(cbf_gamma * max(val - thresh, 0), thresh)
+        #     valid_actions = (qvals >= cbf_thresh).astype(bool)
 
-            if np.any(valid_actions):
-                ac_idx = torch.norm(ac_norms[valid_actions] - torch.from_numpy(ac_norm), dim = 1).argmin()  # First index where condition is True
-                ac_idx = np.nonzero(valid_actions)[0][ac_idx] # Get index into full ac_norms
-            else:
-                print(f"\033[93mNo valid action for threshold {thresh:1.2e}, min value {np.max(qvals):1.2e}\033[0m")
-                ac_idx = qvals.argmax()
-            #if ac_idx != 0:
-            #    #print('CBF filtering!')
-            #elif ac_idx == -1:
-            #    #print("LR filtering")
-            ac_norm = ac_norms[ac_idx].cpu().unsqueeze(0).numpy()
-            action['action'] = (ac_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
+        #     if np.any(valid_actions):
+        #         ac_idx = torch.norm(ac_norms[valid_actions] - torch.from_numpy(ac_norm), dim = 1).argmin()  # First index where condition is True
+        #         ac_idx = np.nonzero(valid_actions)[0][ac_idx] # Get index into full ac_norms
+        #     else:
+        #         print(f"\033[93mNo valid action for threshold {thresh:1.2e}, min value {np.max(qvals):1.2e}\033[0m")
+        #         ac_idx = qvals.argmax()
+        #     #if ac_idx != 0:
+        #     #    #print('CBF filtering!')
+        #     #elif ac_idx == -1:
+        #     #    #print("LR filtering")
+        #     ac_norm = ac_norms[ac_idx].cpu().unsqueeze(0).numpy()
+        #     action['action'] = (ac_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
             
-            taken_vals[episode].append(qvals[ac_idx])
+        #     taken_vals[episode].append(qvals[ac_idx])
 
-        elif filter_mode == 'least_restrictive' or filter_mode == 'lr':
-            if qval < thresh:
-                action['action'] = ac_safe
-        else: 
-            pass # do nothing, use the original action
+        # elif filter_mode == 'least_restrictive' or filter_mode == 'lr':
+        #     if qval < thresh:
+        #         action['action'] = ac_safe
+        # else: 
+        #     pass # do nothing, use the original action
+        mpc.get_action(get_ee_pose(envs)[0, :3], action)
 
-        if ac_prev is not None:
-            print('ac l2norm', np.linalg.norm(ac_prev - action['action'].squeeze()))
         ac_prev = action['action'].squeeze()
 
         #print('ac l2norm', np.linalg.norm(ac_unnorm - action['action'].squeeze()))
@@ -452,11 +584,22 @@ def rollout_policy(
         done = done_vec.cpu().numpy()
         obs_vec['failure'] = info_vec['is_knocked_over']
         knocked_over = knocked_over or info_vec['is_knocked_over'][0]
-
         num_done = done.sum()
         if num_done > 0:
-            print()
-            print('resetting!')
+            # Record outcomes
+            if info_vec['final_info']['is_knocked_over'][0]:
+                outcomes['fail'].append(episode)
+            if info_vec['final_info']['is_obj_lifted'][0]:
+                outcomes['lifted'].append(episode)
+            if info_vec['final_info']['is_grasped'][0]:
+                outcomes['grasped'].append(episode)
+            if info_vec['final_info']['success'][0] and not info_vec['final_info']['is_knocked_over'][0]:
+                outcomes['success'].append(episode)
+            if episode == 7:
+                pass
+            # Record numbers
+            print(f"{episode}:\tfails = {len(outcomes['fail'])}\tsuccess = {len(outcomes['success'])}\tlifted = {len(outcomes['lifted'])}\tgrasped = {len(outcomes['grasped'])}\t\tresetting!")
+
             obs_vec, info = envs.reset()
             obs_vec['failure'] = info['is_knocked_over']
             done_vec = np.zeros(envs.num_envs, bool)
@@ -469,19 +612,41 @@ def rollout_policy(
 
             successes += 0 if knocked_over else 1
             knocked_over = False
+            grasped = False
+            lifted = False
 
             agent_state = None
+            goal = get_block_pose(envs)[0, :3] + np.array([np.random.choice([0, 0.025]), np.random.choice([-0.02, -0.01, 0.0, 0.01, 0.02]), np.random.choice([0.095, 0.1, 0.105])])
+            mpc = EndEffectorMPC(goal, np.eye(3), np.diag(10**np.random.uniform(-3, -1, size=3)), 10)
+
         episode += num_done
 
-    plt.clf()
-    taken = np.concatenate(taken_vals)
-    safe = np.concatenate(safe_vals)
-    plt.scatter(taken[:-1], safe[1:] - taken[:-1], marker='.')
-    plt.xlabel('Q(x, u)')
-    plt.ylabel('Q(f(x, u), pi_safe) - Q(x, u)')
-    plt.savefig(output_dir / 'actual_vs_take.png')
+    # Plot difference between Q(x', pi_safe) and Q(x, u) as a function of Q(x, u)
+    # plt.clf()
+    # taken = np.concatenate(taken_vals)
+    # safe = np.concatenate(safe_vals)
+    # plt.scatter(taken[:-1], safe[1:] - taken[:-1], marker='.')
+    # plt.xlabel('Q(x, u)')
+    # plt.ylabel('Q(f(x, u), pi_safe) - Q(x, u)')
+    # plt.savefig(output_dir / 'actual_vs_taken.png')
 
-    print(f"{successes} out of {num_trajs} successful")
+    # # Plot difference between Q(x, u) and max([Q(x', u) for u in samples]
+    # plt.clf()
+    # samples = np.concatenate(sample_vals)
+    # plt.scatter(taken[:-1], np.max(samples, axis=1)[1:] - taken[:-1], marker='.')
+    # plt.xlabel('Q(x, u)')
+    # plt.ylabel('max_u Q(x\', u) - Q(x, u)')
+    # plt.savefig(output_dir / 'taken_vs_samples.png')
+    # plt.scatter
+    # plt.clf()
+    # plt.imshow(np.row_stack(sweep_res).T)
+    # plt.savefig("test.png")
+    print("did nothing: ", [o for o in range(num_trajs) if o not in outcomes['grasped'] and o not in outcomes['fail']])
+    print("only grasped: ", [o for o in outcomes['grasped'] if o not in outcomes['lifted']])
+    print("only lifted: ", [o for o in outcomes['lifted'] if o not in outcomes['success']])
+    print("successes: ", outcomes['success'])
+    print("fails: ", outcomes['fail'])
+    print(f"{len(outcomes['success'])} success, {len(outcomes['fail'])} fails, ")
 
 
 def main(args):
