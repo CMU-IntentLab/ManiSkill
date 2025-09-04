@@ -96,7 +96,7 @@ def main(args):
 
     # checkpoint = torch.load("/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/wm_edit/wm_lz.pt")
     # checkpoint = torch.load("/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer__1__1756605634/latest.pt")
-    checkpoint = torch.load("/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer__1__1756698045/latest.pt")
+    checkpoint = torch.load("/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/ckpt_data/merged_data/wm_trained_w_merged_data/latest.pt")
 
     state_dict = {k[14:]:v for k,v in checkpoint['agent_state_dict'].items() if '_wm' in k}
 
@@ -108,14 +108,14 @@ def main(args):
     config.batch_length = 5
     expert_eps = collections.OrderedDict()
     # config.offline_data_path = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1756574937/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
-    config.offline_data_path = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch/runs/FilterRolloutGP_20250831-214144/videos/trajectory_mixed.h5'
+    config.offline_data_path = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/ckpt_data/merged_data/merged_data_rollouts/videos/trajectory_mixed.h5'
     tools.fill_expert_dataset(config, expert_eps)
     expert_dataset = make_dataset(expert_eps, config)
 
 
     # NOTE: you can replace this with the dataset you made for the dubins wm training
     # directory = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer__1__1756605634/train_eps'
-    directory = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/examples/baselines/dreamerv3-torch/runs/BlockTopple-v0__dreamer__1__1756698045/train_eps'
+    directory = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/ckpt_data/merged_data/wm_trained_w_merged_data/train_eps'
     train_eps = tools.load_episodes(directory, limit=config.dataset_size)
     train_dataset = make_dataset(train_eps, config)
 
@@ -134,11 +134,6 @@ def main(args):
 
     args.action_shape = env.action_space.shape or env.action_space.n
     args.max_action = env.action_space.high[0]
-
-
-
-    
-
 
     train_envs = DummyVectorEnv(
         [lambda: gymnasium.make('BlockToppleWM-v0', params = [wm, datasets, config]) for _ in range(args.training_num)]
@@ -281,9 +276,14 @@ def main(args):
         if iter  < warmup:
             policy._gamma = 0 # for warmup the value fn
             policy.warmup = True
+            steps_per_collect = 8
+            steps = 40000
         else:
-            policy._gamma = config.gamma_pyhj
+            # policy._gamma = config.gamma_pyhj
+            policy._gamma = 0.99
             policy.warmup = False
+            steps_per_collect = 8
+            steps = 40000
 
         if args.continue_training_epoch is not None:
             print("epoch: {}, remaining epochs: {}".format(epoch//args.epoch, args.total_episodes - iter))
