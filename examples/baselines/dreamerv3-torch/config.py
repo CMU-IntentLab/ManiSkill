@@ -205,11 +205,12 @@ class Args:
     hybrid: bool = True
 
 
-    use_gp: bool = False
+    use_gp: bool = True
     wm_directory: str = "/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/kens_ckpts/wm_lz_aug6.pt"
     filter_directory_nogp: str = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/kens_ckpts/no_gp_aug6.pth'
     filter_directory_gp: str = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/kens_ckpts/gp_aug6.pth'
     filter_thresh: float = 0.2
     num_runs: int = 1
     cbf_gamma: float = 0.7
-    filter_mode: str = 'cbf' # 'cbf' or 'least_restrictive' or 'lr
+    filter_mode: str = 'cbf' # 'cbf' or 'least_restrictive' or 'lr' or 'none'
+    policy: str = 'ppo' # 'ppo' or 'mpc'

@@ -483,7 +483,8 @@ def rollout_policy(
     num_trajs=0,
     thresh=0.6,
     cbf_gamma = 0.7,
-    filter_mode='least_restrictive' # 'cbf' or 'least_restrictive'
+    filter_mode='least_restrictive', # 'cbf' or 'least_restrictive' or 'none'
+    policy='ppo', # 'ppo' or 'mpc'
 ):
     torch.cuda.empty_cache()
     
@@ -495,6 +496,9 @@ def rollout_policy(
 
     agent_state = None
 
+    if policy == 'mpc':
+        mpc = EndEffectorMPC(get_block_pose(envs)[0, :3], 10)
+
     # get output dir for plots (there is likely a better way to do this)
     output_dir = envs._env.env.env.output_dir.with_name('figs')
     output_dir.mkdir(parents=True, exist_ok=True) 
@@ -503,26 +507,28 @@ def rollout_policy(
     max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
     min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
 
-    # Record samples
+    # Record outcomes, values
     knocked_over = False
     successes = 0
     sample_vals = [[] for _ in range(num_trajs)]
     safe_vals = [[] for _ in range(num_trajs)]
     taken_vals = [[] for _ in range(num_trajs)]
     ee_trajs = [[] for _ in range(num_trajs)]
+    outcomes = {"fail":[],"grasped":[],"lifted":[],"success":[]}
 
     # MAIN ENV STEP LOOP
     Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
     ac_prev = None
 
-    mpc = EndEffectorMPC(get_block_pose(envs)[0, :3], 10)
-    outcomes = {"fail":[],"grasped":[],"lifted":[],"success":[]}
     while episode < num_trajs:
+        # Update nominal Dreamer policy (also updates latent using observation)
         action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
         state = agent_state[0].copy()
 
+        # Features
         feat = agent._wm.dynamics.get_feat(agent_state[0]).cpu().detach().numpy()
 
+        # Margin function
         l_gp = torch.tanh(agent._wm.heads['margin_gp'](agent._wm.dynamics.get_feat(agent_state[0])))
         l_nogp = torch.tanh(agent._wm.heads['margin_nogp'](agent._wm.dynamics.get_feat(agent_state[0])))
 
@@ -531,17 +537,23 @@ def rollout_policy(
             action = {k: np.array(action[k].detach().cpu()) for k in action}
         else:
             action = np.array(action)
-        
-        # ac_safe_norm = pi_safe(feat, safe_policy)
-        # ac_unnorm = action['action']
-        # ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
-        # ac_safe = (ac_safe_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
 
-        # # Create interpolation coefficients: shape (N_interp, 1)
-        # N_interp = 10
-        # t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
-        # ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
-        # print('ac_norms', ac_norms.shape, ac_norm.shape)
+        # Query MPC policy
+        if policy == 'mpc':
+            mpc.get_action(get_ee_pose(envs)[0, :3], action)
+
+        # Get safe policy
+        ac_safe_norm = pi_safe(feat, safe_policy)
+
+        # Normalized and unnormalized safe and nominal action (env uses unnormalized, Q uses normalized)
+        ac_unnorm = action['action']
+        ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
+        ac_safe = (ac_safe_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
+
+        # Create interpolation coefficients: shape (N_interp, 1) for filtering
+        N_interp = 10
+        t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
+        ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
 
         # # Other sampling methods
         # # ac_unnorms = torch.from_numpy(np.row_stack([np.linspace(ac_unnorm.flatten(), ac_safe.flatten(), 20), 
@@ -552,47 +564,50 @@ def rollout_policy(
         # # # ac_unnorms = torch.cat([ac_unnorms, torch.zeros(ac_unnorms.shape[0], 1)], dim=1)
         # # # ac_unnorms = torch.cat([ac_unnorms, torch.from_numpy(ac_unnorm), torch.from_numpy(ac_safe)], dim=0)
         # # ac_norms = (ac_unnorms - min_ac) / (max_ac - min_ac) * 2 - 1
-        # ac_norms[:-1, -1] = ac_norm[0, -1] # Override gripper with nominal
+        ac_norms[:-1, -1] = ac_norm[0, -1] # Override gripper with nominal
 
-        # qvals = Q(state, ac_norms)
-        # val = qvals[-1] # Safe policy
-        # qval = qvals[0]
+        # Get qvals
+        qvals = Q(state, ac_norms)
+        val = qvals[-1] # Safe policy
+        qval = qvals[0]
         # print('V:',val)
 
-        # # Record for plotting
-        # sample_vals[episode].append(qvals)
-        # safe_vals[episode].append(val)
-        
-        # if filter_mode == 'cbf':
-        #     cbf_thresh = max(cbf_gamma * max(val - thresh, 0), thresh)
-        #     valid_actions = (qvals >= cbf_thresh).astype(bool)
-
-        #     if np.any(valid_actions):
-        #         ac_idx = torch.norm(ac_norms[valid_actions] - torch.from_numpy(ac_norm), dim = 1).argmin()  # First index where condition is True
-        #         ac_idx = np.nonzero(valid_actions)[0][ac_idx] # Get index into full ac_norms
-        #     else:
-        #         print(f"\033[93mNo valid action for threshold {thresh:1.2e}, min value {np.max(qvals):1.2e}\033[0m")
-        #         ac_idx = qvals.argmax()
-        #     #if ac_idx != 0:
-        #     #    #print('CBF filtering!')
-        #     #elif ac_idx == -1:
-        #     #    #print("LR filtering")
-        #     ac_norm = ac_norms[ac_idx].cpu().unsqueeze(0).numpy()
-        #     action['action'] = (ac_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
-            
-        #     taken_vals[episode].append(qvals[ac_idx])
-
-        # elif filter_mode == 'least_restrictive' or filter_mode == 'lr':
-        #     if qval < thresh:
-        #         action['action'] = ac_safe
-        # else: 
-        #     pass # do nothing, use the original action
-        mpc.get_action(get_ee_pose(envs)[0, :3], action)
+        # Record for plotting
+        sample_vals[episode].append(qvals)
+        safe_vals[episode].append(val)
         ee_trajs[episode].append(get_ee_pose(envs)[0, :3])
+        
+        # Filter (assumes that ac_norms[0] is nominal, ac_norms[-1] is safe, all the others are samples)
+        if filter_mode == 'cbf':
+            cbf_thresh = max(cbf_gamma * max(val - thresh, 0), thresh)
+            valid_actions = (qvals >= cbf_thresh).astype(bool)
+
+            if np.any(valid_actions):
+                ac_idx = torch.norm(ac_norms[valid_actions] - torch.from_numpy(ac_norm), dim = 1).argmin()  # First index where condition is True
+                ac_idx = np.nonzero(valid_actions)[0][ac_idx] # Get index into full ac_norms
+            else:
+                print(f"\033[93mNo valid action for threshold {thresh:1.2e}, min value {np.max(qvals):1.2e}\033[0m")
+                ac_idx = qvals.argmax()
+            #if ac_idx != 0:
+            #    #print('CBF filtering!')
+            #elif ac_idx == -1:
+            #    #print("LR filtering")
+            ac_norm = ac_norms[ac_idx].cpu().unsqueeze(0).numpy()
+            action['action'] = (ac_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
+            
+            taken_vals[episode].append(qvals[ac_idx])
+        elif filter_mode == 'least_restrictive' or filter_mode == 'lr':
+            if qval < thresh:
+                action['action'] = ac_safe
+                taken_vals[episode].append(qvals[-1])
+            else:
+                taken_vals[episode].append(qvals[0])
+        else: 
+            taken_vals[episode].append(qvals[0])
+            pass # do nothing, use the original action
 
         ac_prev = action['action'].squeeze()
 
-        #print('ac l2norm', np.linalg.norm(ac_unnorm - action['action'].squeeze()))
         obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
 
         done_vec = term_vec | trunc_vec
@@ -631,31 +646,31 @@ def rollout_policy(
             lifted = False
 
             agent_state = None
-            goal = get_block_pose(envs)[0, :3]
-            mpc = EndEffectorMPC(goal, 10)
+            if policy == 'mpc':
+                mpc = EndEffectorMPC(get_block_pose(envs)[0, :3], 10)
 
         episode += num_done
 
     # Plot difference between Q(x', pi_safe) and Q(x, u) as a function of Q(x, u)
-    # plt.clf()
-    # taken = np.concatenate(taken_vals)
-    # safe = np.concatenate(safe_vals)
-    # plt.scatter(taken[:-1], safe[1:] - taken[:-1], marker='.')
-    # plt.xlabel('Q(x, u)')
-    # plt.ylabel('Q(f(x, u), pi_safe) - Q(x, u)')
-    # plt.savefig(output_dir / 'actual_vs_taken.png')
+    plt.clf()
+    taken = np.concatenate(taken_vals)
+    safe = np.concatenate(safe_vals)
+    plt.scatter(taken[:-1], safe[1:] - taken[:-1], marker='.')
+    plt.xlabel('Q(x, u)')
+    plt.ylabel('Q(f(x, u), pi_safe) - Q(x, u)')
+    plt.savefig(output_dir / 'actual_vs_taken.png')
 
-    # # Plot difference between Q(x, u) and max([Q(x', u) for u in samples]
-    # plt.clf()
-    # samples = np.concatenate(sample_vals)
-    # plt.scatter(taken[:-1], np.max(samples, axis=1)[1:] - taken[:-1], marker='.')
-    # plt.xlabel('Q(x, u)')
-    # plt.ylabel('max_u Q(x\', u) - Q(x, u)')
-    # plt.savefig(output_dir / 'taken_vs_samples.png')
-    # plt.scatter
-    # plt.clf()
-    # plt.imshow(np.row_stack(sweep_res).T)
-    # plt.savefig("test.png")
+    # Plot difference between Q(x, u) and max([Q(x', u) for u in samples]
+    plt.clf()
+    samples = np.concatenate(sample_vals)
+    plt.scatter(taken[:-1], np.max(samples, axis=1)[1:] - taken[:-1], marker='.')
+    plt.xlabel('Q(x, u)')
+    plt.ylabel('max_u Q(x\', u) - Q(x, u)')
+    plt.savefig(output_dir / 'taken_vs_samples.png')
+    plt.scatter
+
+
+    # Print outcomes
     print("did nothing: ", [o for o in range(num_trajs) if o not in outcomes['grasped'] and o not in outcomes['fail']])
     print("only grasped: ", [o for o in outcomes['grasped'] if o not in outcomes['lifted']])
     print("only lifted: ", [o for o in outcomes['lifted'] if o not in outcomes['success']])
@@ -663,6 +678,7 @@ def rollout_policy(
     print("fails: ", outcomes['fail'])
     print(f"{len(outcomes['success'])} success, {len(outcomes['fail'])} fails, ")
 
+    # Plot endeffector trajectories
     ee_trajs = np.stack(ee_trajs)
     mask = np.max(abs(np.diff(ee_trajs[:, :, 0], axis = 1)), axis=1)
 
@@ -869,7 +885,7 @@ def main(args):
     policy = functools.partial(agent, training=False)
 
     
-    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=args.num_runs, thresh=args.filter_thresh, cbf_gamma=args.cbf_gamma, filter_mode=args.filter_mode)
+    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=args.num_runs, thresh=args.filter_thresh, cbf_gamma=args.cbf_gamma, filter_mode=args.filter_mode, policy=args.policy)
     #envs.reset()
     #print('replay')
     #replay_policy(policy, safe_policy, agent, eval_envs, '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/FilterRollout/videos/trajectory.h5')
