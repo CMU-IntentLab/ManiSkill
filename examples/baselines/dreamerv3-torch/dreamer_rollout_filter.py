@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 from itertools import product
 import imageio.v2 as imageio
 from pydrake.all import (MathematicalProgram, Solve, ClarabelSolver)
+from mpl_toolkits.mplot3d import Axes3D
 
 # ManiSkill specific imports
 import h5py
@@ -396,12 +397,25 @@ def bang_bang_test(envs, action, u, i):
     return delta_ee
 
 class EndEffectorMPC:
-    def __init__(self, goal_pos, Q, R, horizon):
+    def __init__(self, goal_pos, horizon, Q = np.eye(3), R = 1e-2*np.eye(3)):
         self.Q = Q
         self.R = R
         self.horizon = horizon
         A = np.eye(3)
         B = np.diag([0.04, 0.015, 0.0175]) # Approximate delta rates
+
+        # Define all the randomness to get different policies
+        self.noise_level = np.random.choice([0, 0.01, 0.02, 0.03, 0.06])
+        if np.random.rand() < 0.75:
+            goal_pos += np.array([np.random.choice([0, 0.025]), np.random.choice([-0.02, -0.01, 0.0, 0.01, 0.02]), np.random.choice([0.095, 0.1, 0.105])])
+            self.return_pos = np.array([0, np.random.choice([-0.2, -0.1, 0, 0.1, 0.2]), 0.4])
+            self.R_return = np.diag(10**np.random.uniform(-2, 0, size=3))
+        else:
+            goal_pos += np.array([0, 0, 0.1])
+            self.return_pos = np.array([0, np.random.choice([-0.3, -0.2, 0.2, 0.3]), 0.4])
+        self.R_return = np.diag(10**np.random.uniform(-3, -1, size=3))
+        self.R = np.diag(10**np.random.uniform(-3, -1, size=3))
+        self.time_to_grip = np.random.choice(range(5, 11))
 
         # Program and variables
         self.prog = MathematicalProgram()
@@ -426,7 +440,6 @@ class EndEffectorMPC:
 
         # Dumb state machine
         self.state = 0
-        self.noise_level = np.random.choice([0, 0.01, 0.02, 0.03])
 
     def add_tracking_cost(self, goal_pos):
         # Clear costs
@@ -450,12 +463,12 @@ class EndEffectorMPC:
         if self.state == 0 and np.linalg.norm(self.goal_pos - q_ic) >= 1e-3:
             action['action'][0, :3] = result.GetSolution(self.u_sym[0]) + self.noise_level*np.random.randn(3)
             action['action'][0, 6] = 0.55
-        elif self.state < 10:
+        elif self.state < self.time_to_grip:
             self.state += 1
             action['action'][0, 6] = 0
-        elif self.state == 10:
-            self.R = np.diag(10**np.random.uniform(-2, 0, size=3))
-            self.add_tracking_cost(np.array([0, np.random.choice([-0.2, -0.1, 0, 0.1, 0.2]), 0.4]))
+        elif self.state == self.time_to_grip:
+            self.R = self.R_return
+            self.add_tracking_cost(self.return_pos)
             self.state += 1
         else:
             action['action'][0, :3] = result.GetSolution(self.u_sym[0]) + self.noise_level*np.random.randn(3)
@@ -496,12 +509,13 @@ def rollout_policy(
     sample_vals = [[] for _ in range(num_trajs)]
     safe_vals = [[] for _ in range(num_trajs)]
     taken_vals = [[] for _ in range(num_trajs)]
+    ee_trajs = [[] for _ in range(num_trajs)]
 
     # MAIN ENV STEP LOOP
     Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
     ac_prev = None
 
-    mpc = EndEffectorMPC(get_block_pose(envs)[0, :3] + np.random.uniform(low=np.array([-0.05, -0.05, 0.075]), high=np.array([0.05, 0.05, 0.125])), np.eye(3), 1e-2*np.eye(3), 10)
+    mpc = EndEffectorMPC(get_block_pose(envs)[0, :3], 10)
     outcomes = {"fail":[],"grasped":[],"lifted":[],"success":[]}
     while episode < num_trajs:
         action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
@@ -574,6 +588,7 @@ def rollout_policy(
         # else: 
         #     pass # do nothing, use the original action
         mpc.get_action(get_ee_pose(envs)[0, :3], action)
+        ee_trajs[episode].append(get_ee_pose(envs)[0, :3])
 
         ac_prev = action['action'].squeeze()
 
@@ -616,8 +631,8 @@ def rollout_policy(
             lifted = False
 
             agent_state = None
-            goal = get_block_pose(envs)[0, :3] + np.array([np.random.choice([0, 0.025]), np.random.choice([-0.02, -0.01, 0.0, 0.01, 0.02]), np.random.choice([0.095, 0.1, 0.105])])
-            mpc = EndEffectorMPC(goal, np.eye(3), np.diag(10**np.random.uniform(-3, -1, size=3)), 10)
+            goal = get_block_pose(envs)[0, :3]
+            mpc = EndEffectorMPC(goal, 10)
 
         episode += num_done
 
@@ -648,6 +663,21 @@ def rollout_policy(
     print("fails: ", outcomes['fail'])
     print(f"{len(outcomes['success'])} success, {len(outcomes['fail'])} fails, ")
 
+    ee_trajs = np.stack(ee_trajs)
+    mask = np.max(abs(np.diff(ee_trajs[:, :, 0], axis = 1)), axis=1)
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    for traj in ee_trajs[np.where(mask < 0.05)[0], :, :]:
+        x = traj[:, 0]
+        y = traj[:, 1]
+        z = traj[:, 2]
+        ax.plot(x, y, z, alpha=0.6)
+
+    plt.savefig(output_dir / "ee_trajectories.png")
+
+    print("done")
 
 def main(args):
     if args.use_gp:
