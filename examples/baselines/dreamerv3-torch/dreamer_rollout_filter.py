@@ -44,6 +44,7 @@ from PyHJ.data import Batch
 
 
 from config import Args
+from local_config import LocalArgs
 import wandb
 
 to_np = lambda x: x.detach().cpu().numpy()
@@ -898,7 +899,9 @@ def main(args):
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
+    loc_args = LocalArgs()
 
-    
-    
+    for key, value in loc_args.__dict__.items():
+        setattr(args, key, value)
+
     main(args)
