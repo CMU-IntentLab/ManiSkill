@@ -6,6 +6,11 @@ _ext
 build/
 dist/
 *.egg-info/
+.eggs/*
+
+*wandb/
+*runs/
+*wm_cbf_checkpoint/
 
 # ipython/jupyter notebooks
 # *.ipynb

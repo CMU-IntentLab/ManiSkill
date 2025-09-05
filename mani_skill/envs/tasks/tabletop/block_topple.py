@@ -35,7 +35,7 @@ capabilities can be simulated and trained properly. Hence there is extra code fo
 """
 
 
-@register_env("BlockTopple-v0", max_episode_steps=60)
+@register_env("BlockTopple-v0", max_episode_steps=80)
 class BlockToppleEnv(BaseEnv):
 
     _sample_video_link = "https://github.com/haosulab/ManiSkill/raw/main/figures/environment_demos/PickCube-v1_rt.mp4"
@@ -223,7 +223,7 @@ class BlockToppleEnv(BaseEnv):
     def evaluate(self):
         # object lifted above a threshold
         is_obj_lifted = (
-            self.block3.pose.p[:, 2] >= self.height + self.height/2
+            self.block3.pose.p[:, 2] >= self.height #+ self.height/2
         )
         is_grasped = self.agent.is_grasping(self.block3)
         is_robot_static = self.agent.is_static(0.2)
