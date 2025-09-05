@@ -580,5 +580,5 @@ if __name__ == "__main__":
     V_total, Lz_noGP_total, gt_failure_total, success_total = main(args, traj_dataset)
     offline_data_dir = '/'.join((config.offline_data_path).split('/')[:-1]) + '/'
 
-    with open(offline_data_dir + "traj_stats_eval.pkl", "wb") as f:
+    with open(offline_data_dir + "traj_stats_eval_new.pkl", "wb") as f:
         pickle.dump((V_total, Lz_noGP_total, gt_failure_total, success_total), f)
