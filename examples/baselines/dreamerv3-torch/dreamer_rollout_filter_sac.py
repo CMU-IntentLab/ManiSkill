@@ -1,40 +1,45 @@
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+from collections import defaultdict
 import os
 import random
 import time
-from dataclasses import dataclass
-from typing import Dict, Any
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
 
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import tyro
+from torch.distributions.normal import Normal
+from torch.utils.tensorboard import SummaryWriter
 
 # ManiSkill specific imports
+import h5py
 import mani_skill.envs
 from mani_skill.utils import gym_utils
-from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper
+from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper, FlattenRGBDObservationWrapper
 from mani_skill.utils.wrappers.record import RecordEpisode
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from mani_skill.utils.wrappers.dreamer_wrapper import DreamerWrapper, SelectAction, UUID
-from gymnasium import spaces
 
 import pathlib
 import tools
 import collections  
 import models
 import functools
-import pickle
+from torch import distributions as torchd
+from gymnasium import spaces
 
 from PyHJ.utils.net.common import Net
-from PyHJ.utils.net.continuous import Actor, Critic
+from PyHJ.utils.net.continuous import Actor, Critic, ActorProb
 from PyHJ.exploration import GaussianNoise
 from PyHJ.data import Batch
-from tools import fill_expert_dataset
+
 
 from config import Args
-from local_config import LocalArgs
+from local_config_sac import LocalArgs
 import wandb
 
 to_np = lambda x: x.detach().cpu().numpy()
@@ -79,7 +84,6 @@ def combine_dictionaries(
 
     return combined
 
-
 def count_steps(folder):
     return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
 
@@ -91,7 +95,7 @@ def make_dataset(episodes, args):
     
 
 class Logger:
-    def __init__(self, log_wandb=False, tensorboard = None) -> None:
+    def __init__(self, log_wandb=False, tensorboard: SummaryWriter = None) -> None:
         self.writer = tensorboard
         self.log_wandb = log_wandb
     def add_scalar(self, tag, scalar_value, step):
@@ -152,6 +156,7 @@ class Dreamer(nn.Module):
                     self._train(learner_data, expert_data=exp_data)
                 else:
                     self._train(next(self._dataset), expert_data=None)
+                #self._train(next(self._dataset))
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
 
@@ -179,9 +184,12 @@ class Dreamer(nn.Module):
             latent, action = state
         obs = self._wm.preprocess(obs)
         embed = self._wm.encoder(obs)
+        # latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"], sample=False)
 
         do_sample = True
+        # TODO: add logic for continuous latents
         if self._args.eval_state_mean:
+            # latent["stoch"] = latent["mean"]
             do_sample = False
         latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"], sample=do_sample)
         feat = self._wm.dynamics.get_feat(latent)
@@ -189,6 +197,27 @@ class Dreamer(nn.Module):
         gp = self._wm.heads["margin_gp"](feat)[0].item()
         no_gp = self._wm.heads["margin_nogp"](feat)[0].item()
 
+        '''
+        # metrics are TN, FP, TP, FN
+        if obs['failure'].item() == 1 and gp < 0: # TN
+            self.gp_metrics += np.array([1, 0, 0, 0])
+        if obs['failure'].item() == 1 and no_gp < 0:
+            self.nogp_metrics += np.array([1, 0, 0, 0])
+        if obs['failure'].item() == 1 and gp > 0: # FP
+            self.gp_metrics += np.array([0, 1, 0, 0])
+        if obs['failure'].item() == 1 and no_gp > 0:
+            self.nogp_metrics += np.array([0, 1, 0, 0])
+
+        if obs['failure'].item() == 0 and gp < 0: # FN
+            self.gp_metrics += np.array([0, 0, 0, 1])
+        if obs['failure'].item() == 0 and no_gp < 0:
+            self.nogp_metrics += np.array([0, 0, 0, 1])
+        if obs['failure'].item() == 0 and gp > 0: # TP
+            self.gp_metrics += np.array([0, 0, 1, 0])
+        if obs['failure'].item() == 0 and no_gp > 0:
+            self.nogp_metrics += np.array([0, 0, 1, 0])'''
+
+        #print('fail', obs['failure'].item(), 'gp', gp, 'no_gp', no_gp)
         if not training:
             actor = self._task_behavior.actor(feat)
             action = actor.mode()
@@ -236,11 +265,13 @@ class Dreamer(nn.Module):
                 self._metrics[name].append(value)
 
 
+
 def V(state, policy):
     tmp_obs = np.array(state)#.reshape(1,-1)
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
     ac = policy(tmp_batch, model="actor_old").act
-    tmp = policy.critic(tmp_batch.obs, ac)
+    tmp = torch.min(policy.critic1(tmp_batch.obs, ac),
+                    policy.critic2(tmp_batch.obs, ac))
     return tmp.cpu().detach().numpy().flatten()
 
 def Q_v1(state, action, policy):
@@ -251,7 +282,9 @@ def Q_v1(state, action, policy):
         state = np.repeat(state, repeats=b, axis=0)
     tmp_obs = np.array(state)#.reshape(1,-1)
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
-    tmp = policy.critic(tmp_batch.obs, action)
+    # tmp = policy.critic(tmp_batch.obs, action)
+    tmp = torch.min(policy.critic1(tmp_batch.obs, action),
+                    policy.critic2(tmp_batch.obs, action))
     return tmp.cpu().detach().numpy().flatten()
 
 def Q_v2(latent, action, policy, agent):
@@ -283,64 +316,124 @@ def Qfn(agent_state, actions, agent, safe_policy):
     q2 = Q_v2(agent_state, actions, safe_policy, agent)
     return np.minimum(q1, q2)
 
+def pi_safe(state, policy):
+    tmp_obs = np.array(state)#.reshape(1,-1)
+    tmp_batch = Batch(obs = tmp_obs, info = Batch())
+    return policy(tmp_batch, model="actor_old").act.cpu().detach().numpy()#.flatten()
 
-def traj_stats(
-        nom_policy,
-        safe_policy,
-        agent,
-        envs,
-        offline_data
-        ):
-    
+
+
+def rollout_policy(
+    nom_policy,
+    safe_policy,
+    agent,
+    envs,
+    num_trajs=0,
+    thresh=0.6,
+    cbf_gamma = 0.7,
+    filter_mode='least_restrictive' # 'cbf' or 'least_restrictive'
+):
     torch.cuda.empty_cache()
     
-    traj_counter = 0
-    V_total = []
-    Lz_noGP_total = []
-    gt_failure_total = []
-    success_total = []
+    episode = 0
+    
+    obs_vec, info = envs.reset()
+    obs_vec['failure'] = info['is_knocked_over']
+    done_vec = np.zeros(envs.num_envs, bool)
 
-    for ep in offline_data:
-        print('\nEpisode:', traj_counter)
-        traj_counter += 1
-        done_vec = np.zeros(envs.num_envs, bool)
-        agent_state = None
+    agent_state = None
+    
+    # statistics from the offline dataset
+    max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
+    min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
+    # MAIN ENV STEP LOOP
+    Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
+    ac_prev = None
 
-        ep_tstep = 0
-        V_episode = []
-        Lz_noGP_episode = []
-        gt_failure_episode = []
-        success_episode = []
+    Vs = [[] for _ in range(num_trajs)]
 
-        for ep_step in ep:
-            print(f'\rTimestep:{ep_tstep}', end='', flush=True)
-            obs_vec = ep_step
-            _, agent_state = nom_policy(obs_vec, done_vec, agent_state)
-            feat = agent._wm.dynamics.get_feat(agent_state[0]).cpu().detach().numpy()
-            l_gp = torch.tanh(agent._wm.heads['margin_gp'](agent._wm.dynamics.get_feat(agent_state[0])))[0,0]
-            # l_nogp = torch.tanh(agent._wm.heads['margin_nogp'](agent._wm.dynamics.get_feat(agent_state[0])))
+    while episode < num_trajs:
+        action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
+        state = agent_state[0].copy()
 
-            val = V(feat, safe_policy)[0] # this is just to check the shape of feat
-            gt_failure = obs_vec['failure'][0]
-            ep_tstep += 1
+        feat = agent._wm.dynamics.get_feat(agent_state[0]).cpu().detach().numpy()
 
-            V_episode.append(val)
-            Lz_noGP_episode.append(l_gp)
-            gt_failure_episode.append(gt_failure)
-            success_episode.append(obs_vec['success'][0])
+        l_gp = torch.tanh(agent._wm.heads['margin_gp'](agent._wm.dynamics.get_feat(agent_state[0])))
+        l_nogp = torch.tanh(agent._wm.heads['margin_nogp'](agent._wm.dynamics.get_feat(agent_state[0])))
 
-        V_total.append(V_episode.copy())
-        Lz_noGP_total.append(Lz_noGP_episode.copy())
-        gt_failure_total.append(gt_failure_episode.copy())
-        success_total.append(success_episode.copy())
+        # action is a dict with keys action and logprob        
+        if isinstance(action, dict):
+            action = {k: np.array(action[k].detach().cpu()) for k in action}
+        else:
+            action = np.array(action)
 
-    return V_total, Lz_noGP_total, gt_failure_total, success_total
+        ac_safe_norm = pi_safe(feat, safe_policy)
+        ac_unnorm = action['action']
+        ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
+        ac_safe = (ac_safe_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
 
-def main(args, offline_trajs):
+        # Create interpolation coefficients: shape (N_interp, 1)
+        N_interp = 10
+        t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
+        ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
+        #print('ac_norms', ac_norms.shape, ac_norm.shape)
+        ac_norms[:-1, -1] = ac_norm[0, -1]
+
+        val = V(feat, safe_policy)[0] # this is just to check the shape of feat
+        qvals = Q(state, ac_norms)
+        qval = qvals[0]
+        print('V:',val)
+        #print('Q:',qvals)
+        Vs[episode].append(val)
+
+        if filter_mode == 'cbf':
+            thresh = cbf_gamma * val
+            valid_actions = (qvals >= thresh).astype(bool)
+
+            if np.any(valid_actions):
+                ac_idx = valid_actions.argmax()  # First index where condition is True
+            else:
+                ac_idx = -1  # Or None, or raise an exception
+            #if ac_idx != 0:
+            #    #print('CBF filtering!')
+            #elif ac_idx == -1:
+            #    #print("LR filtering")
+            ac_norm = ac_norms[ac_idx].cpu().unsqueeze(0).numpy()
+            action['action'] = (ac_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
+        elif filter_mode == 'least_restrictive' or filter_mode == 'lr':
+            if qval < thresh:
+                action['action'] = ac_safe
+        else: 
+            pass # do nothing, use the original action
+
+        if ac_prev is not None:
+            print('ac l2norm', np.linalg.norm(ac_prev - action['action'].squeeze()))
+        ac_prev = action['action'].squeeze()
+
+        #print('ac l2norm', np.linalg.norm(ac_unnorm - action['action'].squeeze()))
+        obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
+
+        done_vec = term_vec | trunc_vec
+        done = done_vec.cpu().numpy()
+        obs_vec['failure'] = info_vec['is_knocked_over']
+
+        num_done = done.sum()
+        if num_done > 0:
+            print()
+            print('resetting!')
+            obs_vec, info = envs.reset()
+            obs_vec['failure'] = info['is_knocked_over']
+            done_vec = np.zeros(envs.num_envs, bool)
+            agent_state = None
+        episode += num_done
+        
+
+
+def main(args):
     if args.use_gp:
-        run_name = 'FilterRolloutGP'
+        run_name = 'FilterRolloutGP_SAC'
     else:
-        run_name = 'FilterRolloutNoGP'
+        run_name = 'FilterRolloutNoGP_SAC'
 
     run_name = f"{run_name}_{time.strftime('%Y%m%d-%H%M%S')}"
 
@@ -375,6 +468,7 @@ def main(args, offline_trajs):
     envs = gym.make(args.env_id, num_envs=args.num_envs if not args.evaluate else 1, reconfiguration_freq=args.reconfiguration_freq, **env_kwargs)
     eval_envs = gym.make(args.env_id, num_envs=args.num_eval_envs, reconfiguration_freq=args.eval_reconfiguration_freq, human_render_camera_configs=dict(shader_pack="default"), **env_kwargs)
     
+
     # Env Wrappers
     max_episode_steps = gym_utils.find_max_episode_steps_value(envs.env) #60
 
@@ -444,7 +538,6 @@ def main(args, offline_trajs):
         train_dataset,
         expert_dataset=expert_dataset,
     ).to(args.device)
-
     agent.requires_grad_(requires_grad=False)
     checkpoint = torch.load(args.wm_directory)
     agent.load_state_dict(checkpoint["agent_state_dict"])
@@ -455,6 +548,10 @@ def main(args, offline_trajs):
     ob_space = spaces.Box(low=-np.inf, high=np.inf, shape=(1,1,1536,), dtype=np.float32)
 
     args.state_shape = ob_space.shape or ob_space.n
+    args.action_shape = ac_space.shape or ac_space.n
+
+    args.max_action = ac_space.high[0]
+
     args.action_shape = ac_space.shape or ac_space.n
     args.max_action = ac_space.high[0]
 
@@ -481,35 +578,56 @@ def main(args, offline_trajs):
         # report error:
         raise ValueError("Please provide critic_net!")
 
-    critic = Critic(critic_net, device=args.device).to(args.device)
-    critic_optim = torch.optim.Adam(critic.parameters(), lr=args.critic_lr)
+    critic1 = Critic(critic_net, device=args.device).to(args.device)
+    critic1_optim = torch.optim.Adam(critic1.parameters(), lr=args.critic_lr)
+    critic2 = Critic(critic_net, device=args.device).to(args.device)
+    critic2_optim = torch.optim.Adam(critic2.parameters(), lr=args.critic_lr)
+
 
     log_path = None
 
-    from PyHJ.policy import avoid_DDPGPolicy_annealing as DDPGPolicy
+    from PyHJ.policy import avoid_SACPolicy_annealing as SACPolicy
 
-    print("DDPG under the Avoid annealed Bellman equation with no Disturbance has been loaded!")
+    print("SAC under the Avoid annealed Bellman equation with no Disturbance has been loaded!")
 
-    actor_net = Net(args.state_shape, hidden_sizes=args.control_net, activation=actor_activation, device=args.device)
-    actor = Actor(
-        actor_net, args.action_shape, max_action=args.max_action, device=args.device
+    actor1_net = Net(args.state_shape, hidden_sizes=args.control_net, activation=actor_activation, device=args.device)
+    # actor1 = Actor(
+    #     actor1_net, args.action_shape, max_action=args.max_action, device=args.device
+    # ).to(args.device)
+    actor1 = ActorProb(
+        actor1_net, args.action_shape, max_action=args.max_action, device=args.device
     ).to(args.device)
-    actor_optim = torch.optim.Adam(actor.parameters(), lr=args.actor_lr)
+    actor1_optim = torch.optim.Adam(actor1.parameters(), lr=args.actor_lr)
 
+    # safe_policy = DDPGPolicy(
+    #     critic,
+    #     critic_optim,
+    #     tau=args.tau,
+    #     gamma=args.gamma_pyhj,
+    #     exploration_noise=GaussianNoise(sigma=args.exploration_noise),
+    #     reward_normalization=args.rew_norm,
+    #     estimation_step=args.n_step,
+    #     action_space=ac_space,
+    #     actor=actor,
+    #     actor_optim=actor_optim,
+    #     actor_gradient_steps=args.actor_gradient_steps,
+    #     ).to(args.device)
 
-    safe_policy = DDPGPolicy(
-        critic,
-        critic_optim,
+    safe_policy = SACPolicy(
+        critic1,
+        critic1_optim,
+        critic2,
+        critic2_optim,
         tau=args.tau,
         gamma=args.gamma_pyhj,
-        exploration_noise=GaussianNoise(sigma=args.exploration_noise),
-        reward_normalization=args.rew_norm,
+        alpha = args.alpha,
+        exploration_noise= None,#GaussianNoise(sigma=args.exploration_noise), # careful!
+        deterministic_eval = True,
         estimation_step=args.n_step,
         action_space=ac_space,
-        actor=actor,
-        actor_optim=actor_optim,
-        actor_gradient_steps=args.actor_gradient_steps,
-        ).to(args.device)
+        actor1=actor1,
+        actor1_optim=actor1_optim,
+        )
     
     if args.use_gp:
         filter_checkpoint = torch.load(args.filter_directory_gp)
@@ -518,67 +636,24 @@ def main(args, offline_trajs):
     safe_policy.load_state_dict(filter_checkpoint)
 
     policy = functools.partial(agent, training=False)
-    V_total, Lz_noGP_total, gt_failure_total, success_total = traj_stats(policy, safe_policy, agent, eval_envs, offline_trajs)
+
+    
+    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=args.num_runs, thresh=args.filter_thresh, cbf_gamma=args.cbf_gamma, filter_mode=args.filter_mode)
+    #envs.reset()
+    #print('replay')
+    #replay_policy(policy, safe_policy, agent, eval_envs, '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/FilterRollout/videos/trajectory.h5')
+    #print("GP metrics", agent.gp_metrics)
+    #print("No GP metrics", agent.nogp_metrics)
     envs.close()
     eval_envs.close()
+    
 
-    return V_total, Lz_noGP_total, gt_failure_total, success_total
-
-
-def sample_episodes(episodes):
-    """Iterates through episodes and yields each one."""
-    for episode in episodes.values():
-        yield episode
-
-def from_generator(generator):
-    """
-    Takes a generator that yields episodes (dict of lists) and transforms each
-    episode into a list of dictionaries, where each dictionary represents a timestep.
-    """
-    for episode in generator:
-        keys = list(episode.keys())
-        if not keys:
-            continue
-
-        # Assuming all lists in the episode dict have the same length.
-        num_timesteps = len(episode[keys[0]])
-        if num_timesteps == 0:
-            continue
-
-        # Convert the dictionary of lists to a list of dictionaries.
-        episode_timesteps = [
-            {key: torch.tensor(episode[key][i]).unsqueeze(0) for key in keys} for i in range(num_timesteps)
-        ]
-        yield episode_timesteps
-
-
-def make_offline_dataset(episodes):
-    generator = sample_episodes(episodes)
-    dataset = from_generator(generator)
-    return dataset
-
-@dataclass
-class DummyConfigs:
-    # should have this ckpt_data/ppo_trajs directory in the Maniskill folder in the repo
-    # offline_data_path = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/ckpt_data/ppo_trajs/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
-    offline_data_path = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/ckpt_data/eval_trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
-    batch_length = 16
-    batch_size = 32
 
 if __name__ == "__main__":
-    config = DummyConfigs()
-    offline_trajs = collections.OrderedDict()
-    args = Args()
+    args = tyro.cli(Args)
     loc_args = LocalArgs()
+
     for key, value in loc_args.__dict__.items():
         setattr(args, key, value)
-    args.use_gp = True
 
-    fill_expert_dataset(config, offline_trajs)
-    traj_dataset = make_offline_dataset(offline_trajs)
-
-    V_total, Lz_noGP_total, gt_failure_total, success_total = main(args, traj_dataset)
-    offline_data_dir = '/'.join((config.offline_data_path).split('/')[:-1]) + '/'
-
-    with open(offline_data_dir + "traj_stats_eval_new.pkl", "wb") as f:
-        pickle.dump((V_total, Lz_noGP_total, gt_failure_total, success_total), f)
+    main(args)

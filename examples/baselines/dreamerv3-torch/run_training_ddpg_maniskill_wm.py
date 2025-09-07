@@ -129,9 +129,7 @@ def main(args):
     assert hasattr(env, 'action_space') #and hasattr(env, 'action2_space'), "The environment does not have control and disturbance actions!"
     args.state_shape = env.observation_space.shape or env.observation_space.n
     args.action_shape = env.action_space.shape or env.action_space.n
-
     args.max_action = env.action_space.high[0]
-
     args.action_shape = env.action_space.shape or env.action_space.n
     args.max_action = env.action_space.high[0]
 
@@ -191,18 +189,18 @@ def main(args):
 
 
     policy = DDPGPolicy(
-    critic,
-    critic_optim,
-    tau=args.tau,
-    gamma=args.gamma_pyhj,
-    exploration_noise=GaussianNoise(sigma=args.exploration_noise),
-    reward_normalization=args.rew_norm,
-    estimation_step=args.n_step,
-    action_space=env.action_space,
-    actor=actor,
-    actor_optim=actor_optim,
-    actor_gradient_steps=args.actor_gradient_steps,
-    )
+        critic,
+        critic_optim,
+        tau=args.tau,
+        gamma=args.gamma_pyhj,
+        exploration_noise=GaussianNoise(sigma=args.exploration_noise),
+        reward_normalization=args.rew_norm,
+        estimation_step=args.n_step,
+        action_space=env.action_space,
+        actor=actor,
+        actor_optim=actor_optim,
+        actor_gradient_steps=args.actor_gradient_steps,
+        )
 
     if args.use_gp:
         log_path = os.path.join('LCRL/gp')

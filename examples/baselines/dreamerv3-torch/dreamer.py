@@ -238,7 +238,6 @@ def combine_dictionaries(
     return combined
 
 
-
 class Dreamer(nn.Module):
     def __init__(self, obs_space, act_space, args, logger, dataset, expert_dataset=None):
         super(Dreamer, self).__init__()
