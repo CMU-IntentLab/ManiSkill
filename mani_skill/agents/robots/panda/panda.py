@@ -112,10 +112,10 @@ class Panda(BaseAgent):
         )
         arm_pd_ee_delta_pose = PDEEPoseControllerConfig(
             joint_names=self.arm_joint_names,
-            pos_lower=-0.1,
-            pos_upper=0.1,
-            rot_lower=-0.1,
-            rot_upper=0.1,
+            pos_lower=-0.075,
+            pos_upper=0.075,
+            rot_lower=-0.075,
+            rot_upper=0.075,
             stiffness=self.arm_stiffness,
             damping=self.arm_damping,
             force_limit=self.arm_force_limit,

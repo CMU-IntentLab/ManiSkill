@@ -199,16 +199,12 @@ class Args:
     kwargs: Dict[str, Any] = field(default_factory=lambda: {}) # type=str, default="")
 
     gamma_lx: float = 0.75
-    offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     pretrain: int = 500
     hybrid_steps: int = 1_000_000
     hybrid: bool = True
 
 
     use_gp: bool = True
-    wm_directory: str = "/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/kens_ckpts/wm_lz_aug6.pt"
-    filter_directory_nogp: str = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/kens_ckpts/no_gp_aug6.pth'
-    filter_directory_gp: str = '/home/clown2/Desktop/Work/Research/ManiSkill/Maniskill/kens_ckpts/gp_aug6.pth'
     filter_thresh: float = 0.2
     num_runs: int = 1
     cbf_gamma: float = 0.7
