@@ -231,10 +231,10 @@ def fill_expert_dataset(config, cache):
             transition["discount"] = np.array(1.0 if t < T - 1 else 0.0, dtype=np.float32)
 
             # Optional failure tag
-            transition["failure"] = np.array(-1, dtype=np.float32)
+            # transition["failure"] = np.array(-1, dtype=np.float32)
             # NEED THESE LINES when doing wm eval on training data
-            # transition["failure"] = object_failures(torch.tensor([transition['block1'][3:7]]), 
-            #                                         torch.tensor([transition['block2'][3:7]]))
+            transition["failure"] = object_failures(torch.tensor([transition['block1'][3:7]]), 
+                                                    torch.tensor([transition['block2'][3:7]]))
 
             add_to_cache(cache, f"exp_traj_{i}", transition)
     
