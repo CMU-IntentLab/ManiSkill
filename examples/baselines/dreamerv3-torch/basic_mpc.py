@@ -35,7 +35,7 @@ class EndEffectorMPC:
         self.ic_constraint = self.prog.AddConstraint(np.equal(self.q_sym[k], np.zeros(3), dtype=object))
 
         # Control limit constraints
-        self.prog.AddBoundingBoxConstraint(-0.66, 0.66, np.concatenate(self.u_sym))
+        self.prog.AddBoundingBoxConstraint(-1.0, 1.0, np.concatenate(self.u_sym))
 
         # Tracking costs
         self.add_tracking_cost(goal_pos)
@@ -65,7 +65,7 @@ class EndEffectorMPC:
 
         # Dumb state machine
         action['action'] = 0*action['action']
-        if self.state == 0 and np.linalg.norm(self.goal_pos - q_ic) >= 1e-3:
+        if self.state == 0 and np.linalg.norm(self.goal_pos - q_ic) >= 1e-2:
             action['action'][0, :3] = result.GetSolution(self.u_sym[0]) + self.noise_level*np.random.randn(3)
             action['action'][0, 6] = 0.55
         elif self.state < self.time_to_grip:
