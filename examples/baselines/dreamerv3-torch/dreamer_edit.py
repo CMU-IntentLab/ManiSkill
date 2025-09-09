@@ -30,6 +30,8 @@ import models
 import functools
 from torch import distributions as torchd
 
+from local_config import LocalArgs
+
 to_np = lambda x: x.detach().cpu().numpy()
 
 @dataclass
@@ -205,12 +207,12 @@ class Args:
     grad_heads: List[str] = field(default_factory=lambda: ['decoder', 'reward', 'cont'])
 
     gamma_lx: float = 0.75
-    offline_data_path: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
+    offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/dreamerv3-torch/wm_cbf_checkpoint/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     pretrain: int = 500
     hybrid_steps: int = 1_000_000
     hybrid: bool = True
 
-    wm_directory: str = "/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/wm_base/wm_lz.pt"
+    wm_directory: str = "/home/kensuke/ManiSkill/examples/baselines/dreamerv3-torch/wm_cbf_checkpoint/wm_lz_aug24.pt"
     filter_directory: str = ''
 
     reward_threshold: Optional[float] = None
@@ -472,6 +474,14 @@ if __name__ == "__main__":
     else:
         run_name = args.exp_name
 
+    run_name = f"{run_name}_{time.strftime('%Y%m%d-%H%M%S')}"
+
+    # Load local args
+    loc_args = LocalArgs()
+
+    for key, value in loc_args.__dict__.items():
+        setattr(args, key, value)
+
     args.logdir = f"runs/{run_name}"
     args.traindir = pathlib.Path(args.logdir) / "train_eps"
     args.evaldir = pathlib.Path(args.logdir) / "eval_eps"
@@ -689,8 +699,8 @@ if __name__ == "__main__":
             "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
         }
         torch.save(items_to_save, logdir / "latest.pt")
-    for env in envs + eval_envs:
-        try:
-            env.close()
-        except Exception:
-            pass
+    # for env in envs + eval_envs:
+    #     try:
+    #         env.close()
+    #     except Exception:
+    #         pass

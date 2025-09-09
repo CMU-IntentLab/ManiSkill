@@ -604,6 +604,8 @@ def rollout_policy(
     ee_trajs = np.stack(ee_trajs)
     mask = np.max(abs(np.diff(ee_trajs[:, :, 0], axis = 1)), axis=1)
 
+    print("singularities", np.argwhere(mask >= 0.05))
+
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
 
