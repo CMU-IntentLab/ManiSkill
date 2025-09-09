@@ -42,7 +42,7 @@ class BlockToppleWMEnv(gym.Env):
         init = {k: v[:, -1] for k, v in self.latent.items()}
         ac_torch = torch.tensor([[action]], dtype=torch.float32).to(self.device)#*self.scalar
 
-        # ac_torch = (ac_torch + 1) * 0.5 * (self.max_ac - self.min_ac) + self.min_ac
+        ac_torch = (ac_torch + 1) * 0.5 * (self.max_ac - self.min_ac) + self.min_ac
 
         rew = np.inf
         for i in range(self.N):
