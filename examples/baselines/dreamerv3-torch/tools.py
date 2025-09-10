@@ -157,10 +157,40 @@ class Logger:
             wandb.log({name: wandb.Video(value, fps=16, format="mp4")}, step=step)
 
 
-def fill_expert_dataset(config, cache):
+def fill_expert_dataset(config, cache, add_block_failures = False):
     dataset_path = config.offline_data_path 
     f = h5py.File(dataset_path, "r")
     demos = list(f.keys())
+
+    from mani_skill.utils.geometry import rotation_conversions
+    import torch
+
+    def object_failures(
+            block1_q, 
+            block2_q,
+            angle_thresh: float = 1.0
+            ) -> torch.Tensor:
+        
+        """Check if either object is tilted (rotated too far from upright)."""
+        # Get world-frame quaternions (shape: (N, 4))
+        left_quat = block1_q
+        right_quat = block2_q
+
+        # Convert to rotation matrices and then to Euler angles (XYZ convention)
+        left_mat = rotation_conversions.quaternion_to_matrix(left_quat)
+        right_mat = rotation_conversions.quaternion_to_matrix(right_quat)
+        left_euler = rotation_conversions.matrix_to_euler_angles(left_mat, convention="XYZ")
+        right_euler = rotation_conversions.matrix_to_euler_angles(right_mat, convention="XYZ")
+
+        # Check if X or Y angles exceed threshold
+        left_fail = torch.logical_or(left_euler[:, 0].abs() > angle_thresh,
+                    (left_euler[:, 1].abs() > angle_thresh)).float()
+
+        right_fail = torch.logical_or(right_euler[:, 0].abs() > angle_thresh,
+                    right_euler[:, 1].abs() > angle_thresh).float()
+
+        fail = torch.logical_or(left_fail, right_fail).float()
+        return fail
 
     for i, demo in tqdm(
         enumerate(demos),
@@ -178,14 +208,21 @@ def fill_expert_dataset(config, cache):
             transition['wrist_cam'] = traj['obs']['sensor_data']["hand_camera"]['rgb'][t]
             transition['front_cam'] = traj['obs']['sensor_data']["base_camera"]['rgb'][t]
             transition['state'] = traj["obs"]["agent"]["qpos"][t]  # ideally EEF pos or qpos
+            
+
+            # Block states
+            transition['block1'] = traj['env_states']['actors']['block1'][t]
+            transition['block2'] = traj['env_states']['actors']['block2'][t]
 
             # Action and reward from time t
             if t == 0:
                 transition["action"] = np.zeros_like(traj["actions"][t], dtype=np.float32)
                 transition["reward"] = np.zeros_like(traj["rewards"][t], dtype=np.float32)
+                transition['success'] = np.zeros_like(traj['success'][t], dtype=np.bool_)
             else:
                 transition["action"] = np.array(traj["actions"][t-1], dtype=np.float32)
                 transition["reward"] = np.array(traj["rewards"][t-1], dtype=np.float32)
+                transition['success'] = np.array(traj['success'][t-1], dtype=np.bool_)
 
             # Bookkeeping
             transition["is_first"] = np.array(t == 0, dtype=np.bool_)
@@ -195,6 +232,10 @@ def fill_expert_dataset(config, cache):
 
             # Optional failure tag
             transition["failure"] = np.array(-1, dtype=np.float32)
+            if add_block_failures:
+                # NEED THESE LINES when doing wm eval on training data
+                transition["failure"] = object_failures(torch.tensor([transition['block1'][3:7]]), 
+                                                        torch.tensor([transition['block2'][3:7]]))
 
             add_to_cache(cache, f"exp_traj_{i}", transition)
     
