@@ -124,7 +124,7 @@ class Args:
     video_pred_log: bool =  True
     precision: int = 32
     action_repeat: int = 1
-    steps: int = 50_000
+    steps: int = 1_000_000
 
     eval_every: int = 10_000
     log_every: int = 10_000
@@ -190,7 +190,7 @@ class Args:
     imag_gradient_mix: float =  0.0
     eval_state_mean: bool = False
 
-    gamma_lx: float = 0.75
+    gamma_lx: float = 0.1
     offline_data_path: str = '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/ppo/runs/BlockTopple-v0__ppo_rgb__1__1753308792/test_videos/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     pretrain: int = 500
     pretrain: int = 500
@@ -206,7 +206,7 @@ class Args:
     margin_head:  Dict[str, Any] = field(default_factory=lambda:{'layers': 2, 'loss_scale': 1.0})
     grad_heads: List[str] = field(default_factory=lambda: ['decoder', 'reward', 'cont'])
 
-    gamma_lx: float = 0.75
+    gamma_lx: float = 0.1
     offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/dreamerv3-torch/wm_cbf_checkpoint/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     pretrain: int = 500
     hybrid_steps: int = 1_000_000
@@ -390,9 +390,9 @@ class Dreamer(nn.Module):
         no_gp = self._wm.heads["margin_nogp"](feat)
         reward = self._wm.heads["reward"](feat).mode()
         #print('reward', reward.shape, reward)
-        print('fail', obs['failure'])
-        print('gp', 1.*(gp.squeeze()<0))
-        print('no_gp', 1.*(no_gp.squeeze()<0))
+        # print('fail', obs['failure'])
+        # print('gp', 1.*(gp.squeeze()<0))
+        # print('no_gp', 1.*(no_gp.squeeze()<0))
         if not training:
             actor = self._task_behavior.actor(feat)
             action = actor.mode()

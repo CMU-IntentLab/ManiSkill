@@ -58,3 +58,4 @@ htmlcov/
 runs/
 kens_ckpts/
 test.ipynb
+LCRL/*
