@@ -318,7 +318,7 @@ def traj_stats(
             _, agent_state = nom_policy(obs_vec, done_vec, agent_state)
             feat = agent._wm.dynamics.get_feat(agent_state[0]).cpu().detach().numpy()
             l_gp = torch.tanh(agent._wm.heads['margin_gp'](agent._wm.dynamics.get_feat(agent_state[0])))[0,0]
-            # l_nogp = torch.tanh(agent._wm.heads['margin_nogp'](agent._wm.dynamics.get_feat(agent_state[0])))
+            l_nogp = torch.tanh(agent._wm.heads['margin_nogp'](agent._wm.dynamics.get_feat(agent_state[0])))
 
             val = V(feat, safe_policy)[0] # this is just to check the shape of feat
             gt_failure = obs_vec['failure'][0]
@@ -570,8 +570,37 @@ if __name__ == "__main__":
     traj_dataset = make_offline_dataset(offline_trajs)
 
     V_total, Lz_noGP_total, gt_failure_total, success_total = main(args, traj_dataset)
-    offline_data_dir = '/'.join((args.offline_data_path).split('/')[:-1]) + '/'
+    wm_dir = '/'.join((args.wm_directory).split('/')[:-1]) + '/'
 
-    with open(offline_data_dir + "traj_stats_eval_new.pkl", "wb") as f:
+    with open(wm_dir + "traj_stats_eval_new.pkl", "wb") as f:
         pickle.dump((V_total, Lz_noGP_total, gt_failure_total, success_total), f)
+
+    # Create plots
+    with open(wm_dir + "traj_stats_eval_new.pkl", "rb") as f:
+        V_total, Lz_noGP_total, gt_failure_total, success_total = pickle.load(f)
+    V_total_np = np.array(V_total)
+    Lz_noGP_total_np = torch.tensor(Lz_noGP_total).cpu().numpy()    
+    gt_failure_total_np = np.array(gt_failure_total)
+    success_total_np = np.array(success_total)
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    legend_elems = []
+    for row in range(250):
+        colors = ['red' if val > 0 else 'black' for val in gt_failure_total_np[row, :]]
+        ax.plot(np.diff(Lz_noGP_total_np[row, :]), c='b', linewidth=.1)
+        ax.scatter(np.arange(Lz_noGP_total_np.shape[1]-1), np.diff(Lz_noGP_total_np[row, :]), c=colors[:-1], s=1)
+    plt.hlines(0, 0, Lz_noGP_total_np.shape[1]-1, colors='k')
+    plt.savefig(wm_dir + "output_diffLz.png")
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    legend_elems = []
+    for row in range(250):
+        colors = ['red' if val > 0 else 'black' for val in gt_failure_total_np[row, :]]
+        # ax.plot(np.diff(Lz_noGP_total_np[row, :]), c='b', linewidth=.1)
+        ax.scatter(np.arange(Lz_noGP_total_np.shape[1]), Lz_noGP_total_np[row, :], c=colors[:], s=1)
+        ax.plot(Lz_noGP_total_np[row, :], c='b', linewidth=.1)
+    plt.hlines(0, 0, Lz_noGP_total_np.shape[1]-1, colors='k')
+    plt.savefig(wm_dir + "output_Lz.png")
 
