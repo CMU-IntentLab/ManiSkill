@@ -206,10 +206,10 @@ class Args:
     margin_head:  Dict[str, Any] = field(default_factory=lambda:{'layers': 2, 'loss_scale': 1.0})
     grad_heads: List[str] = field(default_factory=lambda: ['decoder', 'reward', 'cont'])
 
-    gamma_lx: float = 0.1
+    gamma_lx: float = 0.75
     offline_data_path: str = '/home/kensuke/ManiSkill/examples/baselines/dreamerv3-torch/wm_cbf_checkpoint/trajectory.rgb.pd_ee_delta_pose.physx_cuda.h5'
     pretrain: int = 500
-    hybrid_steps: int = 1_000_000
+    hybrid_steps: int = 0
     hybrid: bool = True
 
     wm_directory: str = "/home/kensuke/ManiSkill/examples/baselines/dreamerv3-torch/wm_cbf_checkpoint/wm_lz_aug24.pt"
