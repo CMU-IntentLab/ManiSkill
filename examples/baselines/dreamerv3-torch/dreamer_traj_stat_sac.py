@@ -581,7 +581,7 @@ if __name__ == "__main__":
         setattr(args, key, value)
     args.use_gp = True
 
-    fill_expert_dataset(config, offline_trajs)
+    fill_expert_dataset(config, offline_trajs, add_block_failures=True)
     traj_dataset = make_offline_dataset(offline_trajs)
 
     V_total, Lz_noGP_total, gt_failure_total, success_total = main(args, traj_dataset)

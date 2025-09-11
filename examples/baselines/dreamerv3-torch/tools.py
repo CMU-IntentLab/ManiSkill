@@ -157,7 +157,7 @@ class Logger:
             wandb.log({name: wandb.Video(value, fps=16, format="mp4")}, step=step)
 
 
-def fill_expert_dataset(config, cache):
+def fill_expert_dataset(config, cache, add_block_failures = False):
     dataset_path = config.offline_data_path 
     f = h5py.File(dataset_path, "r")
     demos = list(f.keys())
@@ -231,10 +231,11 @@ def fill_expert_dataset(config, cache):
             transition["discount"] = np.array(1.0 if t < T - 1 else 0.0, dtype=np.float32)
 
             # Optional failure tag
-            # transition["failure"] = np.array(-1, dtype=np.float32)
-            # NEED THESE LINES when doing wm eval on training data
-            transition["failure"] = object_failures(torch.tensor([transition['block1'][3:7]]), 
-                                                    torch.tensor([transition['block2'][3:7]]))
+            transition["failure"] = np.array(-1, dtype=np.float32)
+            if add_block_failures:
+                # NEED THESE LINES when doing wm eval on training data
+                transition["failure"] = object_failures(torch.tensor([transition['block1'][3:7]]), 
+                                                        torch.tensor([transition['block2'][3:7]]))
 
             add_to_cache(cache, f"exp_traj_{i}", transition)
     
