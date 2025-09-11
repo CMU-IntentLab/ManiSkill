@@ -13,12 +13,7 @@ import torch.nn as nn
 import torch.optim as optim
 import tyro
 from torch.distributions.normal import Normal
-from torch.utils.tensorboard import SummaryWriter # type: ignore
-import matplotlib.pyplot as plt
-from itertools import product
-import imageio.v2 as imageio
-from mpl_toolkits.mplot3d import Axes3D
-from basic_mpc import EndEffectorMPC
+from torch.utils.tensorboard import SummaryWriter
 
 # ManiSkill specific imports
 import h5py
@@ -38,13 +33,13 @@ from torch import distributions as torchd
 from gymnasium import spaces
 
 from PyHJ.utils.net.common import Net
-from PyHJ.utils.net.continuous import Actor, Critic
+from PyHJ.utils.net.continuous import Actor, Critic, ActorProb
 from PyHJ.exploration import GaussianNoise
 from PyHJ.data import Batch
 
 
 from config import Args
-from local_config import LocalArgs
+from local_config_sac import LocalArgs
 import wandb
 
 to_np = lambda x: x.detach().cpu().numpy()
@@ -275,7 +270,8 @@ def V(state, policy):
     tmp_obs = np.array(state)#.reshape(1,-1)
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
     ac = policy(tmp_batch, model="actor_old").act
-    tmp = policy.critic(tmp_batch.obs, ac)
+    tmp = torch.min(policy.critic1(tmp_batch.obs, ac),
+                    policy.critic2(tmp_batch.obs, ac))
     return tmp.cpu().detach().numpy().flatten()
 
 def Q_v1(state, action, policy):
@@ -286,7 +282,9 @@ def Q_v1(state, action, policy):
         state = np.repeat(state, repeats=b, axis=0)
     tmp_obs = np.array(state)#.reshape(1,-1)
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
-    tmp = policy.critic(tmp_batch.obs, action)
+    # tmp = policy.critic(tmp_batch.obs, action)
+    tmp = torch.min(policy.critic1(tmp_batch.obs, action),
+                    policy.critic2(tmp_batch.obs, action))
     return tmp.cpu().detach().numpy().flatten()
 
 def Q_v2(latent, action, policy, agent):
@@ -323,79 +321,7 @@ def pi_safe(state, policy):
     tmp_batch = Batch(obs = tmp_obs, info = Batch())
     return policy(tmp_batch, model="actor_old").act.cpu().detach().numpy()#.flatten()
 
-def get_ee_pose(envs):
-    env_agent = envs.unwrapped.agent
-    ee_pose = env_agent.robot.links_map[env_agent.ee_link_name].pose.raw_pose.cpu().detach().numpy()
-    return ee_pose
 
-def get_block_pose(envs):
-    env_block = envs.unwrapped.block3
-    block_pose = env_block.pose.raw_pose.cpu().detach().numpy()
-    return block_pose
-
-def steer_to_pose(envs, action, des_pose):
-    ee_pose = get_ee_pose(envs)
-    err = des_pose - ee_pose[0, :3]
-    action['action'] = 0*action['action']
-    action['action'][0, :3] = np.clip(err, -0.2, 0.2)
-    action['action'][0, 6] = 0.5
-    return action
-
-def pi_test(envs, action): # Move the gripper over the green block for testing the filter with a simple policy
-    env_agent = envs.unwrapped.agent
-    ee_pose = env_agent.robot.links_map[env_agent.ee_link_name].pose.raw_pose.cpu().detach().numpy()
-    env_block = envs.unwrapped.block3
-    block_pose = env_block.pose.raw_pose.cpu().detach().numpy()
-    err = block_pose[0, :3] - ee_pose[0, :3]
-    err[2] += 0.1
-    err[0] -= 0.035
-    err[1] -= 0.05
-    action['action'] = 0*action['action']
-    action['action'][0, :3] = np.clip(10*err, -0.2, 0.2)
-    action['action'][0, 6] = 0.5
-    return action
-
-def pi_sweep(envs, action):
-    action['action'] = 0*action['action']
-    action['action'][0, 1] = 0.0
-    action['action'][0, 6] = 0.5
-    return action
-
-# Sweeps the actions from an initial condition
-def sweep_action(envs, action, i):
-    # envs.reset()
-    state = envs.unwrapped.get_state().detach().clone()
-    action['action'] = 0*action['action']
-    N = 100
-    delta_ee = np.zeros((10, N))
-    for (k, u) in enumerate(np.linspace(-1, 1, N)):
-        start_pose = get_ee_pose(envs)
-        action['action'][0, i] = u
-        for j in range(10):
-            envs.step(action)
-            delta_pose = get_ee_pose(envs) - start_pose
-            delta_ee[j, k] = delta_pose[0, i]
-        envs.unwrapped.set_state(state)
-        print(k)
-    return delta_ee
-
-def bang_bang_test(envs, action, u, i):
-    envs.reset()
-    state = envs.unwrapped.get_state().detach().clone()
-    action['action'] = 0*action['action']
-    action['action'][0, i] = u
-    N = 10
-    delta_ee = np.zeros((2, 10))
-    start_pose = get_ee_pose(envs)
-    for k in range(N):
-        envs.step(action)
-        delta_pose = get_ee_pose(envs) - start_pose
-        if k > N/2:
-            action['action'][0, i] = 0
-        delta_ee[0, k] = delta_pose[0, i]
-        delta_ee[1, k] = action['action'][0, i]/5
-        print(k)
-    return delta_ee
 
 def rollout_policy(
     nom_policy,
@@ -405,8 +331,7 @@ def rollout_policy(
     num_trajs=0,
     thresh=0.6,
     cbf_gamma = 0.7,
-    filter_mode='least_restrictive', # 'cbf' or 'least_restrictive' or 'none'
-    policy='ppo', # 'ppo' or 'mpc'
+    filter_mode='least_restrictive' # 'cbf' or 'least_restrictive'
 ):
     torch.cuda.empty_cache()
     
@@ -417,40 +342,22 @@ def rollout_policy(
     done_vec = np.zeros(envs.num_envs, bool)
 
     agent_state = None
-
-    if policy == 'mpc':
-        mpc = EndEffectorMPC(get_block_pose(envs)[0, :3], 10)
-
-    # get output dir for plots (there is likely a better way to do this)
-    output_dir = envs._env.env.env.output_dir.with_name('figs')
-    output_dir.mkdir(parents=True, exist_ok=True) 
     
     # statistics from the offline dataset
     max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
     min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
-
-    # Record outcomes, values
-    knocked_over = False
-    successes = 0
-    sample_vals = [[] for _ in range(num_trajs)]
-    safe_vals = [[] for _ in range(num_trajs)]
-    taken_vals = [[] for _ in range(num_trajs)]
-    ee_trajs = [[] for _ in range(num_trajs)]
-    outcomes = {"fail":[],"grasped":[],"lifted":[],"success":[]}
-
     # MAIN ENV STEP LOOP
     Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
     ac_prev = None
 
+    Vs = [[] for _ in range(num_trajs)]
+
     while episode < num_trajs:
-        # Update nominal Dreamer policy (also updates latent using observation)
         action, agent_state = nom_policy(obs_vec, done_vec, agent_state)
         state = agent_state[0].copy()
 
-        # Features
         feat = agent._wm.dynamics.get_feat(agent_state[0]).cpu().detach().numpy()
 
-        # Margin function
         l_gp = torch.tanh(agent._wm.heads['margin_gp'](agent._wm.dynamics.get_feat(agent_state[0])))
         l_nogp = torch.tanh(agent._wm.heads['margin_nogp'](agent._wm.dynamics.get_feat(agent_state[0])))
 
@@ -460,168 +367,73 @@ def rollout_policy(
         else:
             action = np.array(action)
 
-        # Query MPC policy
-        if policy == 'mpc':
-            mpc.get_action(get_ee_pose(envs)[0, :3], action)
-
-        # Get safe policy
         ac_safe_norm = pi_safe(feat, safe_policy)
-
-        # Normalized and unnormalized safe and nominal action (env uses unnormalized, Q uses normalized)
         ac_unnorm = action['action']
         ac_norm = (action['action'] - min_ac) / (max_ac - min_ac) * 2 - 1
         ac_safe = (ac_safe_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
 
-        # Create interpolation coefficients: shape (N_interp, 1) for filtering
+        # Create interpolation coefficients: shape (N_interp, 1)
         N_interp = 10
         t = torch.linspace(0, 1, steps=N_interp).unsqueeze(1)  # shape (N_interp, 1)
         ac_norms = (1 - t) * ac_norm + t * ac_safe_norm
+        #print('ac_norms', ac_norms.shape, ac_norm.shape)
+        ac_norms[:-1, -1] = ac_norm[0, -1]
 
-        # # Other sampling methods
-        # # ac_unnorms = torch.from_numpy(np.row_stack([np.linspace(ac_unnorm.flatten(), ac_safe.flatten(), 20), 
-        # #                            np.linspace(ac_unnorm.flatten(), 0*ac_unnorm.flatten(), 20), 
-        # #                            np.linspace(0*ac_unnorm.flatten(), ac_safe.flatten(), 20)]))
-        
-        # # # ac_unnorms = torch.tensor(list(product(torch.linspace(-1, 1, 5).tolist(), repeat=6)))
-        # # # ac_unnorms = torch.cat([ac_unnorms, torch.zeros(ac_unnorms.shape[0], 1)], dim=1)
-        # # # ac_unnorms = torch.cat([ac_unnorms, torch.from_numpy(ac_unnorm), torch.from_numpy(ac_safe)], dim=0)
-        # # ac_norms = (ac_unnorms - min_ac) / (max_ac - min_ac) * 2 - 1
-        ac_norms[:-1, -1] = ac_norm[0, -1] # Override gripper with nominal
-
-        # Get qvals
+        val = V(feat, safe_policy)[0] # this is just to check the shape of feat
         qvals = Q(state, ac_norms)
-        val = qvals[-1] # Safe policy
         qval = qvals[0]
-        # print('V:',val)
+        print('V:',val)
+        #print('Q:',qvals)
+        Vs[episode].append(val)
 
-        # Record for plotting
-        sample_vals[episode].append(qvals)
-        safe_vals[episode].append(val)
-        ee_trajs[episode].append(get_ee_pose(envs)[0, :3])
-        
-        # Filter (assumes that ac_norms[0] is nominal, ac_norms[-1] is safe, all the others are samples)
         if filter_mode == 'cbf':
-            cbf_thresh = max(cbf_gamma * max(val - thresh, 0), thresh)
-            valid_actions = (qvals >= cbf_thresh).astype(bool)
+            thresh = cbf_gamma * val
+            valid_actions = (qvals >= thresh).astype(bool)
 
             if np.any(valid_actions):
-                ac_idx = torch.norm(ac_norms[valid_actions] - torch.from_numpy(ac_norm), dim = 1).argmin()  # First index where condition is True
-                ac_idx = np.nonzero(valid_actions)[0][ac_idx] # Get index into full ac_norms
+                ac_idx = valid_actions.argmax()  # First index where condition is True
             else:
-                print(f"\033[93mNo valid action for threshold {thresh:1.2e}, min value {np.max(qvals):1.2e}\033[0m")
-                ac_idx = qvals.argmax()
+                ac_idx = -1  # Or None, or raise an exception
             #if ac_idx != 0:
             #    #print('CBF filtering!')
             #elif ac_idx == -1:
             #    #print("LR filtering")
             ac_norm = ac_norms[ac_idx].cpu().unsqueeze(0).numpy()
             action['action'] = (ac_norm + 1) * 0.5 * (max_ac - min_ac) + min_ac
-            
-            taken_vals[episode].append(qvals[ac_idx])
         elif filter_mode == 'least_restrictive' or filter_mode == 'lr':
             if qval < thresh:
                 action['action'] = ac_safe
-                taken_vals[episode].append(qvals[-1])
-            else:
-                taken_vals[episode].append(qvals[0])
         else: 
-            taken_vals[episode].append(qvals[0])
             pass # do nothing, use the original action
 
+        if ac_prev is not None:
+            print('ac l2norm', np.linalg.norm(ac_prev - action['action'].squeeze()))
         ac_prev = action['action'].squeeze()
 
+        #print('ac l2norm', np.linalg.norm(ac_unnorm - action['action'].squeeze()))
         obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
 
         done_vec = term_vec | trunc_vec
         done = done_vec.cpu().numpy()
         obs_vec['failure'] = info_vec['is_knocked_over']
-        knocked_over = knocked_over or info_vec['is_knocked_over'][0]
+
         num_done = done.sum()
         if num_done > 0:
-            # Record outcomes
-            if info_vec['final_info']['is_knocked_over'][0]:
-                outcomes['fail'].append(episode)
-            if info_vec['final_info']['is_obj_lifted'][0]:
-                outcomes['lifted'].append(episode)
-            if info_vec['final_info']['is_grasped'][0]:
-                outcomes['grasped'].append(episode)
-            if info_vec['final_info']['success'][0] and not info_vec['final_info']['is_knocked_over'][0]:
-                outcomes['success'].append(episode)
-            if episode == 7:
-                pass
-            # Record numbers
-            print(f"{episode}:\tfails = {len(outcomes['fail'])}\tsuccess = {len(outcomes['success'])}\tlifted = {len(outcomes['lifted'])}\tgrasped = {len(outcomes['grasped'])}\t\tresetting!")
-
+            print()
+            print('resetting!')
             obs_vec, info = envs.reset()
             obs_vec['failure'] = info['is_knocked_over']
             done_vec = np.zeros(envs.num_envs, bool)
-
-            plt.plot(sample_vals[episode], color="grey")
-            plt.plot(safe_vals[episode], color="green", linestyle='-', marker='x')
-            plt.plot(taken_vals[episode], color="black", linestyle='-', marker='x')
-            plt.savefig(output_dir / f"safe_sample_vals{episode}.png")
-            plt.clf()
-
-            successes += 0 if knocked_over else 1
-            knocked_over = False
-            grasped = False
-            lifted = False
-
             agent_state = None
-            if policy == 'mpc':
-                mpc = EndEffectorMPC(get_block_pose(envs)[0, :3], 10)
-
         episode += num_done
+        
 
-    # Plot difference between Q(x', pi_safe) and Q(x, u) as a function of Q(x, u)
-    plt.clf()
-    taken = np.concatenate(taken_vals)
-    safe = np.concatenate(safe_vals)
-    plt.scatter(taken[:-1], safe[1:] - taken[:-1], marker='.')
-    plt.xlabel('Q(x, u)')
-    plt.ylabel('Q(f(x, u), pi_safe) - Q(x, u)')
-    plt.savefig(output_dir / 'actual_vs_taken.png')
-
-    # Plot difference between Q(x, u) and max([Q(x', u) for u in samples]
-    plt.clf()
-    samples = np.concatenate(sample_vals)
-    plt.scatter(taken[:-1], np.max(samples, axis=1)[1:] - taken[:-1], marker='.')
-    plt.xlabel('Q(x, u)')
-    plt.ylabel('max_u Q(x\', u) - Q(x, u)')
-    plt.savefig(output_dir / 'taken_vs_samples.png')
-    plt.scatter
-
-
-    # Print outcomes
-    print("did nothing: ", [o for o in range(num_trajs) if o not in outcomes['grasped'] and o not in outcomes['fail']])
-    print("only grasped: ", [o for o in outcomes['grasped'] if o not in outcomes['lifted']])
-    print("only lifted: ", [o for o in outcomes['lifted'] if o not in outcomes['success']])
-    print("successes: ", outcomes['success'])
-    print("fails: ", outcomes['fail'])
-    print(f"{len(outcomes['success'])} success, {len(outcomes['fail'])} fails, ")
-
-    # Plot endeffector trajectories
-    ee_trajs = np.stack(ee_trajs)
-    mask = np.max(abs(np.diff(ee_trajs[:, :, 0], axis = 1)), axis=1)
-
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-
-    for traj in ee_trajs[np.where(mask < 0.05)[0], :, :]:
-        x = traj[:, 0]
-        y = traj[:, 1]
-        z = traj[:, 2]
-        ax.plot(x, y, z, alpha=0.6)
-
-    plt.savefig(output_dir / "ee_trajectories.png")
-
-    print("done")
 
 def main(args):
     if args.use_gp:
-        run_name = 'FilterRolloutGP'
+        run_name = 'FilterRolloutGP_SAC'
     else:
-        run_name = 'FilterRolloutNoGP'
+        run_name = 'FilterRolloutNoGP_SAC'
 
     run_name = f"{run_name}_{time.strftime('%Y%m%d-%H%M%S')}"
 
@@ -766,35 +578,57 @@ def main(args):
         # report error:
         raise ValueError("Please provide critic_net!")
 
-    critic = Critic(critic_net, device=args.device).to(args.device)
-    critic_optim = torch.optim.Adam(critic.parameters(), lr=args.critic_lr)
+    critic1 = Critic(critic_net, device=args.device).to(args.device)
+    critic1_optim = torch.optim.Adam(critic1.parameters(), lr=args.critic_lr)
+    critic2 = Critic(critic_net, device=args.device).to(args.device)
+    critic2_optim = torch.optim.Adam(critic2.parameters(), lr=args.critic_lr)
+
 
     log_path = None
 
-    from PyHJ.policy import avoid_DDPGPolicy_annealing as DDPGPolicy
+    from PyHJ.policy import avoid_SACPolicy_annealing as SACPolicy
 
-    print("DDPG under the Avoid annealed Bellman equation with no Disturbance has been loaded!")
+    print("SAC under the Avoid annealed Bellman equation with no Disturbance has been loaded!")
 
-    actor_net = Net(args.state_shape, hidden_sizes=args.control_net, activation=actor_activation, device=args.device)
-    actor = Actor(
-        actor_net, args.action_shape, max_action=args.max_action, device=args.device
+    actor1_net = Net(args.state_shape, hidden_sizes=args.control_net, activation=actor_activation, device=args.device)
+    # actor1 = Actor(
+    #     actor1_net, args.action_shape, max_action=args.max_action, device=args.device
+    # ).to(args.device)
+    actor1 = ActorProb(
+        actor1_net, args.action_shape, max_action=args.max_action, device=args.device
     ).to(args.device)
-    actor_optim = torch.optim.Adam(actor.parameters(), lr=args.actor_lr)
+    actor1_optim = torch.optim.Adam(actor1.parameters(), lr=args.actor_lr)
 
+    # safe_policy = DDPGPolicy(
+    #     critic,
+    #     critic_optim,
+    #     tau=args.tau,
+    #     gamma=args.gamma_pyhj,
+    #     exploration_noise=GaussianNoise(sigma=args.exploration_noise),
+    #     reward_normalization=args.rew_norm,
+    #     estimation_step=args.n_step,
+    #     action_space=ac_space,
+    #     actor=actor,
+    #     actor_optim=actor_optim,
+    #     actor_gradient_steps=args.actor_gradient_steps,
+    #     ).to(args.device)
 
-    safe_policy = DDPGPolicy(
-    critic,
-    critic_optim,
-    tau=args.tau,
-    gamma=args.gamma_pyhj,
-    exploration_noise=GaussianNoise(sigma=args.exploration_noise),
-    reward_normalization=args.rew_norm,
-    estimation_step=args.n_step,
-    action_space=ac_space,
-    actor=actor,
-    actor_optim=actor_optim,
-    actor_gradient_steps=args.actor_gradient_steps,
-    ).to(args.device)
+    safe_policy = SACPolicy(
+        critic1,
+        critic1_optim,
+        critic2,
+        critic2_optim,
+        tau=args.tau,
+        gamma=args.gamma_pyhj,
+        alpha = args.alpha,
+        exploration_noise= None,#GaussianNoise(sigma=args.exploration_noise), # careful!
+        deterministic_eval = True,
+        estimation_step=args.n_step,
+        action_space=ac_space,
+        actor1=actor1,
+        actor1_optim=actor1_optim,
+        )
+    
     if args.use_gp:
         filter_checkpoint = torch.load(args.filter_directory_gp)
     else:
@@ -804,7 +638,7 @@ def main(args):
     policy = functools.partial(agent, training=False)
 
     
-    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=args.num_runs, thresh=args.filter_thresh, cbf_gamma=args.cbf_gamma, filter_mode=args.filter_mode, policy=args.policy)
+    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=args.num_runs, thresh=args.filter_thresh, cbf_gamma=args.cbf_gamma, filter_mode=args.filter_mode)
     #envs.reset()
     #print('replay')
     #replay_policy(policy, safe_policy, agent, eval_envs, '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/FilterRollout/videos/trajectory.h5')

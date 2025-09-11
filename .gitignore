@@ -56,5 +56,10 @@ htmlcov/
 
 **/wandb/
 runs/
-kens_ckpts/
+ckpt_data/
 test.ipynb
+
+**/LCRL/
+**/LCRL_SAC/
+
+**/local_config.py
