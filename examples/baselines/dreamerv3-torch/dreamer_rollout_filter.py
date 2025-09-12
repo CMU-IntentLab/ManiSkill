@@ -19,6 +19,7 @@ from itertools import product
 import imageio.v2 as imageio
 from mpl_toolkits.mplot3d import Axes3D
 from basic_mpc import EndEffectorMPC
+import pickle
 
 # ManiSkill specific imports
 import h5py
@@ -420,6 +421,8 @@ def rollout_policy(
 
     if policy == 'mpc':
         mpc = EndEffectorMPC(get_block_pose(envs)[0, :3], 10)
+    elif policy == 'sweep': # Use MPC to do a sweep
+        mpc = Sweep(get_block_pose(envs)[0, :3],)
 
     # get output dir for plots (there is likely a better way to do this)
     output_dir = envs._env.env.env.output_dir.with_name('figs')
@@ -429,13 +432,17 @@ def rollout_policy(
     max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
     min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
 
-    # Record outcomes, values
+    # Record outcomes, values, actions
     knocked_over = False
     successes = 0
     sample_vals = [[] for _ in range(num_trajs)]
     safe_vals = [[] for _ in range(num_trajs)]
     taken_vals = [[] for _ in range(num_trajs)]
     ee_trajs = [[] for _ in range(num_trajs)]
+    nominal_actions = [[] for _ in range(num_trajs)]
+    safe_actions = [[] for _ in range(num_trajs)]
+    sample_actions = [[] for _ in range(num_trajs)]
+    taken_actions = [[] for _ in range(num_trajs)]
     outcomes = {"fail":[],"grasped":[],"lifted":[],"success":[]}
 
     # MAIN ENV STEP LOOP
@@ -498,6 +505,9 @@ def rollout_policy(
         sample_vals[episode].append(qvals)
         safe_vals[episode].append(val)
         ee_trajs[episode].append(get_ee_pose(envs)[0, :3])
+        nominal_actions[episode].append(ac_unnorm)
+        safe_actions[episode].append(ac_safe)
+        sample_actions[episode].append((ac_norms + 1) * 0.5 * (max_ac - min_ac) + min_ac)
         
         # Filter (assumes that ac_norms[0] is nominal, ac_norms[-1] is safe, all the others are samples)
         if filter_mode == 'cbf':
@@ -529,6 +539,8 @@ def rollout_policy(
             pass # do nothing, use the original action
 
         ac_prev = action['action'].squeeze()
+
+        taken_actions[episode].append(action['action'])
 
         obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
 
@@ -616,6 +628,13 @@ def rollout_policy(
         ax.plot(x, y, z, alpha=0.6)
 
     plt.savefig(output_dir / "ee_trajectories.png")
+
+    # Dump everything to a pickle
+    envs._env.env.env.output_dir
+    with open(envs._env.env.env.output_dir / "filter_results.pkl", "wb") as f:
+        pickle.dump((sample_vals, safe_vals, taken_vals,
+                     nominal_actions, safe_actions, sample_actions, taken_actions,
+                     ee_trajs, outcomes, filter_mode, policy, thresh, cbf_gamma), f)
 
     print("done")
 
