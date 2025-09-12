@@ -15,6 +15,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch import distributions as torchd
 from torch.utils.tensorboard import SummaryWriter
+from basic_mpc import EndEffectorMPC
 
 import wandb
 to_np = lambda x: x.detach().cpu().numpy()
@@ -238,7 +239,16 @@ def fill_expert_dataset(config, cache, add_block_failures = False):
                                                         torch.tensor([transition['block2'][3:7]]))
 
             add_to_cache(cache, f"exp_traj_{i}", transition)
-    
+
+def get_ee_pose(envs):
+    env_agent = envs.unwrapped.agent
+    ee_pose = env_agent.robot.links_map[env_agent.ee_link_name].pose.raw_pose.cpu().detach().numpy()
+    return ee_pose
+
+def get_block_pose(envs):
+    env_block = envs.unwrapped.block3
+    block_pose = env_block.pose.raw_pose.cpu().detach().numpy()
+    return block_pose
 
 def simulate(
     agent,
@@ -251,6 +261,7 @@ def simulate(
     steps=0,
     episodes=0,
     state=None,
+    use_mpc=False
 ):
     torch.cuda.empty_cache()
     
@@ -284,7 +295,9 @@ def simulate(
     done_vec = np.zeros(envs.num_envs, bool)
 
     reward = [0] * envs.num_envs
-    
+
+    if use_mpc:
+        mpc = [EndEffectorMPC(get_block_pose(envs)[i, :3], 10, env_id=i) for i in range(envs.num_envs)]
     
     while (steps and step < steps) or (episodes and episode < episodes):
         #print('step', step, 'episode', episode)
@@ -301,7 +314,11 @@ def simulate(
             action = {k: np.array(action[k].detach().cpu()) for k in action}
         else:
             action = np.array(action)
-        #times["data_transfer"] += time.time() - t0        
+        #times["data_transfer"] += time.time() - t0      
+
+        if use_mpc:
+            for i in range(envs.num_envs):
+                mpc[i].get_action(get_ee_pose(envs)[i, :3], action)
         
         #t0 = time.time()
         obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
@@ -378,9 +395,11 @@ def simulate(
         #print('dones', done)
 
         if done.any():
+
             indices = [index for index, d in enumerate(done) if d]
             # logging for done episode
             for i in indices:
+
                 #print('cache', cache.keys())
                 save_episodes(directory, {env_id: cache[env_id]})
                 length = len(cache[env_id]["reward"]) - 1
@@ -436,6 +455,9 @@ def simulate(
                         logger.scalar(f"eval_episodes", len(eval_scores))
                         logger.write(step=logger.step)
                         eval_done = True
+
+                if use_mpc:
+                    mpc[i] = EndEffectorMPC(get_block_pose(envs)[i, :3], 10, env_id=i)
 
         #times["logging"] += time.time() - t0
 

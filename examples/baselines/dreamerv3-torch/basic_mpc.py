@@ -2,10 +2,11 @@ from pydrake.all import (MathematicalProgram, Solve, ClarabelSolver)
 import numpy as np
 
 class EndEffectorMPC:
-    def __init__(self, goal_pos, horizon, Q = np.eye(3), R = 1e-2*np.eye(3)):
+    def __init__(self, goal_pos, horizon, Q = np.eye(3), R = 1e-2*np.eye(3), env_id=0):
         self.Q = Q
         self.R = R
         self.horizon = horizon
+        self.env_id = env_id
         A = np.eye(3)
         B = np.diag([0.04, 0.015, 0.0175]) # Approximate delta rates
 
@@ -64,18 +65,18 @@ class EndEffectorMPC:
         result = self.solver.Solve(self.prog)
 
         # Dumb state machine
-        action['action'] = 0*action['action']
+        action['action'][self.env_id, :] = 0
         if self.state == 0 and np.linalg.norm(self.goal_pos - q_ic) >= 1e-2:
-            action['action'][0, :3] = result.GetSolution(self.u_sym[0]) + self.noise_level*np.random.randn(3)
-            action['action'][0, 6] = 0.55
+            action['action'][self.env_id, :3] = result.GetSolution(self.u_sym[0]) + self.noise_level*np.random.randn(3)
+            action['action'][self.env_id, 6] = 0.55
         elif self.state < self.time_to_grip:
             self.state += 1
-            action['action'][0, 6] = 0
+            action['action'][self.env_id, 6] = 0
         elif self.state == self.time_to_grip:
             self.R = self.R_return
             self.add_tracking_cost(self.return_pos)
             self.state += 1
         else:
-            action['action'][0, :3] = result.GetSolution(self.u_sym[0]) + self.noise_level*np.random.randn(3)
-            action['action'][0, 6] = 0
+            action['action'][self.env_id, :3] = result.GetSolution(self.u_sym[0]) + self.noise_level*np.random.randn(3)
+            action['action'][self.env_id, 6] = 0
         return action

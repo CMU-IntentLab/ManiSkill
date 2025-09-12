@@ -248,6 +248,7 @@ class Args:
     critic_activation: str = "ReLU"
     warm_start_path: str = None # type=str, default=None)
     kwargs: Dict[str, Any] = field(default_factory=lambda: {}) # type=str, default="")
+    policy: str = "mpc"
 
 
 from typing import Dict, Any, Union
@@ -637,6 +638,7 @@ if __name__ == "__main__":
             logger,
             limit=args.dataset_size,
             steps=prefill,
+            use_mpc=(args.policy=="mpc")
         )
         logger.step += prefill * args.action_repeat
         print(f"Logger: ({logger.step} steps).")
@@ -679,6 +681,7 @@ if __name__ == "__main__":
                 logger,
                 is_eval=True,
                 episodes=args.eval_episode_num,
+                use_mpc=(args.policy=="mpc")
             )
             if args.video_pred_log:
                 video_pred = agent._wm.video_pred(next(eval_dataset))
@@ -693,6 +696,7 @@ if __name__ == "__main__":
             limit=args.dataset_size,
             steps=args.eval_every,
             state=state,
+            use_mpc=(args.policy=="mpc")
         )
         items_to_save = {
             "agent_state_dict": agent.state_dict(),
