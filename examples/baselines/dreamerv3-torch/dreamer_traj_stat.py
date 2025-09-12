@@ -283,13 +283,40 @@ def Qfn(agent_state, actions, agent, safe_policy):
     q2 = Q_v2(agent_state, actions, safe_policy, agent)
     return np.minimum(q1, q2)
 
+import imageio
+class LatentVideo():
+    def __init__(self):
+        self.frames = []
+
+    def add_frame(self, _wm, state, data):
+        data = _wm.preprocess(data)
+        embed = _wm.encoder(data).unsqueeze(0)
+        action = data["action"].unsqueeze(0)
+        is_first = data["is_first"].unsqueeze(0)
+
+        states, _ = _wm.dynamics.observe(embed, action, is_first, state=state)
+        init = {k: v[:, -1] for k, v in states.items()}
+        prior = _wm.dynamics.imagine_with_action(action, init)
+        openl_wrist = _wm.heads["decoder"](_wm.dynamics.get_feat(prior))["wrist_cam"].mode().squeeze()
+        openl_front = _wm.heads["decoder"](_wm.dynamics.get_feat(prior))["front_cam"].mode().squeeze()
+        truth_wrist = data["wrist_cam"].squeeze()
+        truth_front = data["front_cam"].squeeze()
+
+        frame = torch.cat([torch.cat([openl_wrist, openl_front], 0), torch.cat([truth_wrist, truth_front], 0)], 1)
+        self.frames.append(frame.detach().cpu())
+
+    def save(self, filepath):
+        imageio.mimsave(filepath, self.frames, fps=10)
+        self.frames = []
 
 def traj_stats(
         nom_policy,
         safe_policy,
         agent,
         envs,
-        offline_data
+        offline_data, 
+        record_video,
+        video_path
         ):
     
     torch.cuda.empty_cache()
@@ -300,7 +327,10 @@ def traj_stats(
     gt_failure_total = []
     success_total = []
 
-    for ep in offline_data:
+    if record_video:
+        video = LatentVideo()
+
+    for (i, ep) in enumerate(offline_data):
         print('\nEpisode:', traj_counter)
         traj_counter += 1
         done_vec = np.zeros(envs.num_envs, bool)
@@ -320,6 +350,9 @@ def traj_stats(
             l_gp = torch.tanh(agent._wm.heads['margin_gp'](agent._wm.dynamics.get_feat(agent_state[0])))[0,0]
             l_nogp = torch.tanh(agent._wm.heads['margin_nogp'](agent._wm.dynamics.get_feat(agent_state[0])))
 
+            if record_video:
+                video.add_frame(agent._wm, agent_state[0], ep_step)
+
             val = V(feat, safe_policy)[0] # this is just to check the shape of feat
             gt_failure = obs_vec['failure'][0]
             ep_tstep += 1
@@ -328,6 +361,9 @@ def traj_stats(
             Lz_noGP_episode.append(l_gp)
             gt_failure_episode.append(gt_failure)
             # success_episode.append(obs_vec['success'][0])
+
+        if record_video:
+            video.save(video_path + "traj_stat_videos/" + str(i) + ".mp4")
 
         V_total.append(V_episode.copy())
         Lz_noGP_total.append(Lz_noGP_episode.copy())
@@ -518,7 +554,7 @@ def main(args, offline_trajs):
     safe_policy.load_state_dict(filter_checkpoint)
 
     policy = functools.partial(agent, training=False)
-    V_total, Lz_noGP_total, gt_failure_total, success_total = traj_stats(policy, safe_policy, agent, eval_envs, offline_trajs)
+    V_total, Lz_noGP_total, gt_failure_total, success_total = traj_stats(policy, safe_policy, agent, eval_envs, offline_trajs, args.traj_stat_video, '/'.join((args.wm_directory).split('/')[:-1]) + '/')
     envs.close()
     eval_envs.close()
 
@@ -603,4 +639,10 @@ if __name__ == "__main__":
         ax.plot(Lz_noGP_total_np[row, :], c='b', linewidth=.1)
     plt.hlines(0, 0, Lz_noGP_total_np.shape[1]-1, colors='k')
     plt.savefig(wm_dir + "output_Lz.png")
+
+    # Calculate false positives
+    false_pos = np.sum(np.logical_and(Lz_noGP_total_np < 0, gt_failure_total_np.squeeze() == 0), axis=1)
+    false_pos_sorted = sorted([(i, v) for (i, v) in enumerate(false_pos) if v > 0], key=lambda x: x[1])
+    for (i, v) in false_pos_sorted:
+        print(i, ": ", v)
 
