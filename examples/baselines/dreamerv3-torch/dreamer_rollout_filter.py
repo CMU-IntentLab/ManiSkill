@@ -50,6 +50,8 @@ import wandb
 
 to_np = lambda x: x.detach().cpu().numpy()
 
+os.environ["WANDB_MODE"] = "disabled"
+
 def combine_dictionaries(
     one_dict: Dict[str, Any], other_dict: Dict[str, Any], take_half: bool = False
 ) -> Dict[str, Any]:
@@ -398,6 +400,48 @@ def bang_bang_test(envs, action, u, i):
         print(k)
     return delta_ee
 
+import imageio
+from PIL import Image
+class SamplingVideo():
+    def __init__(self):
+        self.frames = []
+        self.max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
+        self.min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
+
+    def add_frame(self, _wm, state, obs_vec, action, Q):
+        N = 128*128
+        data = _wm.preprocess(obs_vec)
+        embed = _wm.encoder(data).unsqueeze(0).repeat(N, 1, 1)
+        truth_wrist = data["wrist_cam"].squeeze()
+        truth_front = data["front_cam"].squeeze()
+        is_first = data["is_first"].unsqueeze(0).repeat(N, 1, 1)
+
+        action_range = torch.linspace(-1, 1, 128)
+
+        actions = torch.stack([torch.tensor([x, y, 0, 0, 0, 0, 0]) for x in action_range for y in action_range])
+        actions[:-1, -1] = float(action[0, -1]) # Override gripper with nominal
+
+        qvals = (torch.tensor(Q(state, to_np(actions))) + 1)/2
+        
+        actions = actions.unsqueeze(1).to(embed.device)
+
+        state_repeat = {'logit': state['logit'].repeat(N, 1, 1, 1),
+                 'deter': state['deter'].repeat(N, 1, 1),
+                 'stoch': state['stoch'].repeat(N, 1, 1, 1)}
+
+        states, _ = _wm.dynamics.observe(embed, actions, is_first)#, state=state_repeat)#, state=state_repeat)
+
+        l_gp = torch.tanh(_wm.heads['margin_gp'](_wm.dynamics.get_feat(states))).squeeze().reshape(128, 128, 1).repeat(1, 1, 3)
+        l_gp = (l_gp + 1)/2
+        qvals = qvals.squeeze().reshape(128, 128, 1).repeat(1, 1, 3)
+
+        self.frames.append(torch.cat([torch.cat([truth_wrist.detach().cpu(), truth_front.detach().cpu()], 1), 
+                        torch.cat([l_gp.detach().cpu(), qvals], 1)], 0))
+
+    def save(self, filepath):
+        imageio.mimsave(filepath, self.frames, fps=2)
+        self.frames = []
+
 def rollout_policy(
     nom_policy,
     safe_policy,
@@ -408,6 +452,7 @@ def rollout_policy(
     cbf_gamma = 0.7,
     filter_mode='least_restrictive', # 'cbf' or 'least_restrictive' or 'none'
     policy='ppo', # 'ppo' or 'mpc'
+    sampling_video=False
 ):
     torch.cuda.empty_cache()
     
@@ -448,6 +493,11 @@ def rollout_policy(
     # MAIN ENV STEP LOOP
     Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
     ac_prev = None
+
+    if sampling_video:
+        video = SamplingVideo()
+        video_dir = envs._env.env.env.output_dir.with_name('samp_vids')
+        video_dir.mkdir(parents=True, exist_ok=True)
 
     while episode < num_trajs:
         # Update nominal Dreamer policy (also updates latent using observation)
@@ -540,6 +590,9 @@ def rollout_policy(
 
         ac_prev = action['action'].squeeze()
 
+        if sampling_video:
+            video.add_frame(agent._wm, agent_state[0], obs_vec, ac_norm, Q)
+
         taken_actions[episode].append(action['action'])
 
         obs_vec, reward_vec, term_vec, trunc_vec, info_vec = envs.step(action)
@@ -582,6 +635,8 @@ def rollout_policy(
             agent_state = None
             if policy == 'mpc':
                 mpc = EndEffectorMPC(get_block_pose(envs)[0, :3], 10)
+            if sampling_video:
+                video.save(video_dir / (str(episode) + ".mp4"))
 
         episode += num_done
 
@@ -828,7 +883,7 @@ def main(args):
     policy = functools.partial(agent, training=False)
 
     
-    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=args.num_runs, thresh=args.filter_thresh, cbf_gamma=args.cbf_gamma, filter_mode=args.filter_mode, policy=args.policy)
+    rollout_policy(policy, safe_policy, agent, eval_envs, num_trajs=args.num_runs, thresh=args.filter_thresh, cbf_gamma=args.cbf_gamma, filter_mode=args.filter_mode, policy=args.policy, sampling_video=args.sampling_video)
     #envs.reset()
     #print('replay')
     #replay_policy(policy, safe_policy, agent, eval_envs, '/home/kensuke/WM_CBF/ManiSkill/examples/baselines/dreamerv3-torch/runs/FilterRollout/videos/trajectory.h5')
