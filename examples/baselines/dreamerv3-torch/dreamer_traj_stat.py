@@ -330,6 +330,11 @@ def traj_stats(
     if record_video:
         video = LatentVideo()
 
+    # statistics from the offline dataset
+    max_ac = np.array([0.76098621, 0.30531207, 0.34810847, 0.0697008,  0.14093682, 0.0133229, 0.59313494])
+    min_ac = np.array([-0.1864568, -0.22532985, -0.25439265, -0.10240789, -0.09638732, -0.12006265, -1.53002357])
+    Q = functools.partial(Qfn, agent=agent, safe_policy=safe_policy)
+
     for (i, ep) in enumerate(offline_data):
         print('\nEpisode:', traj_counter)
         traj_counter += 1
@@ -353,7 +358,8 @@ def traj_stats(
             if record_video:
                 video.add_frame(agent._wm, agent_state[0], ep_step)
 
-            val = V(feat, safe_policy)[0] # this is just to check the shape of feat
+            ac_norm = (obs_vec['action'] - min_ac) / (max_ac - min_ac) *2 - 1
+            val = Q(agent_state[0].copy(), ac_norm)
             gt_failure = obs_vec['failure'][0]
             ep_tstep += 1
 
@@ -601,12 +607,12 @@ if __name__ == "__main__":
     for key, value in loc_args.__dict__.items():
         setattr(args, key, value)
     args.use_gp = True
+    wm_dir = '/'.join((args.wm_directory).split('/')[:-1]) + '/'
 
     fill_expert_dataset(args, offline_trajs, add_block_failures=True)
     traj_dataset = make_offline_dataset(offline_trajs)
 
     V_total, Lz_noGP_total, gt_failure_total, success_total = main(args, traj_dataset)
-    wm_dir = '/'.join((args.wm_directory).split('/')[:-1]) + '/'
 
     with open(wm_dir + "traj_stats_eval_new.pkl", "wb") as f:
         pickle.dump((V_total, Lz_noGP_total, gt_failure_total, success_total), f)
@@ -614,12 +620,21 @@ if __name__ == "__main__":
     # Create plots
     with open(wm_dir + "traj_stats_eval_new.pkl", "rb") as f:
         V_total, Lz_noGP_total, gt_failure_total, success_total = pickle.load(f)
-    V_total_np = np.array(V_total)
+    V_total_np = np.array(V_total).squeeze()
     Lz_noGP_total_np = torch.tensor(Lz_noGP_total).cpu().numpy()    
     gt_failure_total_np = np.array(gt_failure_total)
     success_total_np = np.array(success_total)
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    legend_elems = []
+    for row in range(250):
+        colors = ['red' if val > 0 else 'black' for val in gt_failure_total_np[row, :]]
+        ax.plot(np.diff(np.diff(Lz_noGP_total_np[row, :])), c='b', linewidth=.1)
+        ax.scatter(np.arange(Lz_noGP_total_np.shape[1]-2), np.diff(np.diff(Lz_noGP_total_np[row, :])), c=colors[:-2], s=1)
+    plt.hlines(0, 0, Lz_noGP_total_np.shape[1]-1, colors='k')
+    plt.savefig(wm_dir + "output_ddLz.png")
 
     fig, ax = plt.subplots(figsize=(12, 8))
     legend_elems = []
@@ -639,6 +654,25 @@ if __name__ == "__main__":
         ax.plot(Lz_noGP_total_np[row, :], c='b', linewidth=.1)
     plt.hlines(0, 0, Lz_noGP_total_np.shape[1]-1, colors='k')
     plt.savefig(wm_dir + "output_Lz.png")
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    legend_elems = []
+    for row in range(250):
+        colors = ['red' if val > 0 else 'black' for val in gt_failure_total_np[row, :]]
+        ax.plot(np.diff(V_total_np[row, :]), c='b', linewidth=.1)
+        ax.scatter(np.arange(V_total_np.shape[1]-1), np.diff(V_total_np[row, :]), c=colors[:-1], s=1)
+    plt.hlines(0, 0, V_total_np.shape[1]-1, colors='k')
+    plt.savefig(wm_dir + "output_diffV.png")
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    legend_elems = []
+    for row in range(250):
+        colors = ['red' if val > 0 else 'black' for val in gt_failure_total_np[row, :]]
+        # ax.plot(np.diff(Lz_noGP_total_np[row, :]), c='b', linewidth=.1)
+        ax.scatter(np.arange(V_total_np.shape[1]), V_total_np[row, :], c=colors[:], s=1)
+        ax.plot(V_total_np[row, :], c='b', linewidth=.1)
+    plt.hlines(0, 0, V_total_np.shape[1]-1, colors='k')
+    plt.savefig(wm_dir + "output_V.png")
 
     # Calculate false positives
     false_pos = np.sum(np.logical_and(Lz_noGP_total_np < 0, gt_failure_total_np.squeeze() == 0), axis=1)
