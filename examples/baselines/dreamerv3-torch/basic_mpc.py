@@ -2,7 +2,7 @@ from pydrake.all import (MathematicalProgram, Solve, ClarabelSolver)
 import numpy as np
 
 class EndEffectorMPC:
-    def __init__(self, goal_pos, horizon, Q = np.eye(3), R = 1e-2*np.eye(3), env_id=0):
+    def __init__(self, goal_pos, horizon, Q = np.eye(3), R = 1e-2*np.eye(3), env_id=0, random=True):
         self.Q = Q
         self.R = R
         self.horizon = horizon
@@ -11,17 +11,24 @@ class EndEffectorMPC:
         B = np.diag([0.04, 0.015, 0.0175]) # Approximate delta rates
 
         # Define all the randomness to get different policies
-        self.noise_level = np.random.choice([0, 0.01, 0.02, 0.03, 0.06])
-        if np.random.rand() < 0.75:
-            goal_pos += np.array([np.random.choice([0, 0.025]), np.random.choice([-0.02, -0.01, 0.0, 0.01, 0.02]), np.random.choice([0.095, 0.1, 0.105])])
-            self.return_pos = np.array([0, np.random.choice([-0.2, -0.1, 0, 0.1, 0.2]), 0.4])
-            self.R_return = np.diag(10**np.random.uniform(-2, 0, size=3))
+        if random:
+            self.noise_level = np.random.choice([0, 0.01, 0.02, 0.03, 0.06])
+            if np.random.rand() < 0.75:
+                goal_pos += np.array([np.random.choice([0, 0.025]), np.random.choice([-0.02, -0.01, 0.0, 0.01, 0.02]), np.random.choice([0.095, 0.1, 0.105])])
+                self.return_pos = np.array([0, np.random.choice([-0.2, -0.1, 0, 0.1, 0.2]), 0.4])
+                self.R_return = np.diag(10**np.random.uniform(-2, 0, size=3))
+            else:
+                goal_pos += np.array([0, 0, 0.1])
+                self.return_pos = np.array([0, np.random.choice([-0.3, -0.2, 0.2, 0.3]), 0.4])
+            self.R_return = np.diag(10**np.random.uniform(-3, -1, size=3))
+            self.R = np.diag(10**np.random.uniform(-3, -1, size=3))
+            self.time_to_grip = np.random.choice(range(5, 11))
         else:
             goal_pos += np.array([0, 0, 0.1])
-            self.return_pos = np.array([0, np.random.choice([-0.3, -0.2, 0.2, 0.3]), 0.4])
-        self.R_return = np.diag(10**np.random.uniform(-3, -1, size=3))
-        self.R = np.diag(10**np.random.uniform(-3, -1, size=3))
-        self.time_to_grip = np.random.choice(range(5, 11))
+            self.noise_level = 25e-2
+            self.return_pos = np.array([0, 0, 0.4])
+            self.R_return = 1e-1*np.eye(3)
+            self.time_to_grip = 10
 
         # Program and variables
         self.prog = MathematicalProgram()
